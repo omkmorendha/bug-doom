@@ -286,6 +286,21 @@ BUG_FRAMES_ART = [
         "..l.w..k..w.l..",
         "....w.....w....",
     ],
+    # frame 2: attack telegraph — wide eyes + bared mandibles. Never part of
+    # the % 2 walk cycle; only selected explicitly while a bug lunges.
+    [
+        ".r...........r.",
+        "..r.........r..",
+        "...kkkkkkkkk...",
+        "..khhhhhhhhhk..",
+        ".kgRRRgggRRRgk.",
+        ".kgRRRgggRRRgk.",
+        "lkgggggggggggkl",
+        ".lkgggggggggkl.",
+        "..lkkkkkkkkkl..",
+        ".l..w..RR.w..l.",
+        "l....w.RRw....l",
+    ],
 ]
 
 BUG_PALETTE = {
@@ -401,6 +416,22 @@ GUN_FIRE_ART = [
     "..kdddddddddddk..",
     ".kdddddddddddddk.",
 ]
+# shotgun pump pulled back: the brown fore-end rows sit one row lower
+GUN_PUMP_ART = [
+    "......kkkkk......",
+    "......kgggk......",
+    "......kglgk......",
+    "......kglgk......",
+    ".....kkglgkk.....",
+    ".....kdglgdk.....",
+    "....kkdgggdkk....",
+    "....kkdgggdkk....",
+    "....kbbbbbbbk....",
+    "....kbkbbbkbk....",
+    "...kdddddddddk...",
+    "..kdddddddddddk..",
+    ".kdddddddddddddk.",
+]
 
 
 PISTOL_ART = [
@@ -467,6 +498,7 @@ def build_overlay(art, palette):
 
 GUN_SPRITE = build_overlay(GUN_ART, GUN_PALETTE)
 GUN_FIRE_SPRITE = build_overlay(GUN_FIRE_ART, GUN_PALETTE)
+GUN_PUMP_SPRITE = build_overlay(GUN_PUMP_ART, GUN_PALETTE)
 PISTOL_SPRITE = build_overlay(PISTOL_ART, GUN_PALETTE)
 PISTOL_FIRE_SPRITE = build_overlay(PISTOL_FIRE_ART, GUN_PALETTE)
 SMG_SPRITE = build_overlay(SMG_ART, GUN_PALETTE)
@@ -534,6 +566,28 @@ PICKUP_SPRITES = {
 }
 PICKUP_KINDS = ("health", "quad", "speed", "invuln")
 PICKUP_WEIGHTS = (45, 20, 20, 15)
+
+# Corpse goo splats: flat 11x4 billboards pinned to the floor line.
+SPLAT_ART = [
+    [
+        "..s..ss.s..",
+        ".sssSSSss..",
+        "ssSSSSSSss.",
+        ".s.ssss.ss.",
+    ],
+    [
+        ".s.ss..s...",
+        "..sSSSSss..",
+        ".sSSSSSSs..",
+        "s.ss.sss.s.",
+    ],
+]
+SPLAT_GREEN_PAL = {"S": (110, 220, 70), "s": (50, 110, 36)}
+SPLAT_PURPLE_PAL = {"S": (148, 62, 200), "s": (70, 34, 95)}
+SPLAT_SPRITES = {
+    "green": [build_sprite(a, SPLAT_GREEN_PAL) for a in SPLAT_ART],
+    "purple": [build_sprite(a, SPLAT_PURPLE_PAL) for a in SPLAT_ART],
+}
 
 # Grenade billboard: dark sphere, blinking red fuse (two frames swap R<->k).
 NADE_PAL = {"k": (26, 30, 26), "h": (90, 110, 90), "R": (255, 40, 40)}
@@ -690,6 +744,10 @@ class Bug:
         self.phase = random.uniform(0, TAU)
         self.bite_cd = 0.0
         self.flash = 0.0
+        self.stagger = 0.0  # knocked back by a hit: movement pauses
+        self.dying = 0.0  # > 0: squashing into the floor, no AI
+        self.born = time.time()  # spawn rise-in + bite grace
+        self.lunge = 0.0  # bite telegraph: attack frame + size pop
         # pack AI: half chase directly, a quarter flank each side
         self.flank = random.choice((-1.0, 0.0, 0.0, 1.0))
         self.spit_cd = random.uniform(1.0, 2.0)
@@ -730,6 +788,13 @@ class Game:
         self.quad_until = 0.0
         self.speed_until = 0.0
         self.invuln_until = 0.0
+        self.shake = 0.0  # camera shake: seconds remaining / magnitude px
+        self.shake_mag = 0.0
+        self.hitstop = 0.0  # kill micro-freeze: world time dilation
+        self.hit_marker = 0.0  # crosshair hit-confirm timer
+        self.hit_kill = False
+        self.corpses = []  # (x, y, variant, kindgroup), FIFO-capped at 30
+        self.show_map = True
         # run stats (recorded to the save file at game end)
         self.start_time = time.time()
         self.shots_fired = 0
@@ -848,7 +913,7 @@ class Game:
         sep = [None] * n
         for i in range(n):
             b = bugs[i]
-            if b.kind == "boss":
+            if b.kind == "boss" or b.dying > 0:
                 continue
             bx, by = b.x, b.y
             best, bo = 1e9, None
@@ -856,6 +921,8 @@ class Game:
                 if j == i:
                     continue
                 o = bugs[j]
+                if o.dying > 0:
+                    continue
                 d2 = (bx - o.x) ** 2 + (by - o.y) ** 2
                 if d2 < best:
                     best, bo = d2, o
@@ -865,10 +932,21 @@ class Game:
                 f = (0.9 - d) * 1.5 * dt
                 sep[i] = (math.cos(away) * f, math.sin(away) * f)
         for i, b in enumerate(list(bugs)):
+            if b.dying > 0:  # squashing: no AI, just the death timer
+                b.dying -= dt
+                if b.dying <= 0 and b in self.bugs:
+                    self.bugs.remove(b)
+                    group = "purple" if b.kind in ("tank", "boss") else "green"
+                    self.corpses.append((b.x, b.y, random.randint(0, 1), group))
+                    if len(self.corpses) > 30:
+                        self.corpses.pop(0)
+                continue
             if detonations and b not in self.bugs:
                 continue  # chained away by an earlier detonation this frame
             b.bite_cd = max(0.0, b.bite_cd - dt)
             b.flash = max(0.0, b.flash - dt)
+            b.stagger = max(0.0, b.stagger - dt)
+            b.lunge = max(0.0, b.lunge - dt)
             dx, dy = self.px - b.x, self.py - b.y
             dist = math.hypot(dx, dy)
             ang = math.atan2(dy, dx)
@@ -930,10 +1008,13 @@ class Game:
                         ang += math.sin(now * 5 + b.phase) * 1.1
                     else:
                         ang += math.sin(now * 2 + b.phase) * 0.6
-                if dist > 0.5:  # stop at biting range so bugs stay shootable
+                if dist > 0.5 and b.stagger <= 0:  # stop at biting range so bugs stay shootable
                     self._step(b, ang, spd, s)
-            if b.bite_dmg and dist < 0.75 and b.bite_cd <= 0:
-                self.hurt(b.bite_dmg, now)
+            if b.bite_dmg and dist < 0.75 and b.bite_cd <= 0 and now - b.born >= 0.35:
+                b.lunge = 0.25  # telegraph: attack frame + size pop
+                if self.hurt(b.bite_dmg, now):
+                    self.shake = 0.22
+                    self.shake_mag = 3.5
                 b.bite_cd = 1.5 if kind == "boss" else 1.0
         return detonations
 
@@ -969,11 +1050,25 @@ class Game:
                 bug.hp -= dmg
                 bug.flash = 0.15
                 if bug.hp <= 0:
-                    self.bugs.remove(bug)
+                    if bug.kind == "boomer":
+                        # exploders detonate via handle_kill_fx: vanish now
+                        self.bugs.remove(bug)
+                    else:
+                        bug.dying = 0.3  # squash into the floor, then splat
+                        bug.flash = 0.0
                     self.score += 1
                     self.kills_by_kind[bug.kind] = self.kills_by_kind.get(bug.kind, 0) + 1
                     events.append((bug, best[0], True))
                 else:
+                    if bug.kind != "boss":  # knockback + stagger (boss immune)
+                        ux, uy = (bug.x - self.px) / best[0], (bug.y - self.py) / best[0]
+                        nx = bug.x + ux * 0.35
+                        if not is_wall(nx, bug.y):
+                            bug.x = nx
+                        ny = bug.y + uy * 0.35
+                        if not is_wall(bug.x, ny):
+                            bug.y = ny
+                        bug.stagger = 0.25
                     events.append((bug, best[0], False))
         if events:
             self.shots_hit += 1  # once per trigger pull, not per pellet
@@ -1033,6 +1128,8 @@ class Game:
         """AoE damage. Returns [(killed_bug, dist_from_player), ...]."""
         killed = []
         for b in list(self.bugs):
+            if b.dying > 0:
+                continue  # already a corpse-in-progress: don't eat the blast
             if math.hypot(b.x - x, b.y - y) < bug_radius:
                 b.hp -= bug_damage
                 b.flash = 0.15
@@ -1274,16 +1371,91 @@ class Renderer:
                 if c is not None:
                     fb[bottom - sh + yi][x] = c
 
+    def draw_minimap(self, fb, g, now):
+        """North-up local minimap in the top-right corner (M toggles)."""
+        if not g.show_map or self.fb_w < 70 or self.fb_h < 50:
+            return
+        fb_w, fb_h = self.fb_w, self.fb_h
+        R = 9  # window radius in cells; 19x19 cells at 2x2 px each
+        left, top = int(g.px) - R, int(g.py) - R
+        x0, y0 = fb_w - 42, 2
+        size = 2 * (2 * R + 1) + 2  # interior + 1px border ring
+        bg, border = pack(14, 16, 18), pack(70, 70, 82)
+        for yy in range(y0, min(fb_h, y0 + size)):
+            row = fb[yy]
+            edge_y = yy == y0 or yy == y0 + size - 1
+            for xx in range(max(0, x0), min(fb_w, x0 + size)):
+                row[xx] = border if (edge_y or xx == x0 or xx == x0 + size - 1) else bg
+        wall_cols = {"#": pack(140, 60, 46), "%": pack(70, 86, 102), "&": pack(80, 110, 60)}
+        oob = wall_cols["#"]
+        for cy in range(top, top + 2 * R + 1):
+            in_y = 0 <= cy < MAP_H
+            mrow = MAP[cy] if in_y else None
+            by = y0 + 1 + 2 * (cy - top)
+            for cx in range(left, left + 2 * R + 1):
+                if in_y and 0 <= cx < MAP_W:
+                    c = wall_cols.get(mrow[cx])
+                    if c is None:
+                        continue  # floor: leave the background
+                else:
+                    c = oob
+                bx = x0 + 1 + 2 * (cx - left)
+                for yy in (by, by + 1):
+                    if 0 <= yy < fb_h:
+                        row = fb[yy]
+                        for xx in (bx, bx + 1):
+                            if 0 <= xx < fb_w:
+                                row[xx] = c
+        # player blip + facing ray (north-up: map x/y = world x/y)
+        ccx, ccy = x0 + 1 + 2 * R, y0 + 1 + 2 * R
+        white, ray = pack(255, 255, 255), pack(255, 230, 120)
+        for yy in (ccy, ccy + 1):
+            if 0 <= yy < fb_h:
+                for xx in (ccx, ccx + 1):
+                    if 0 <= xx < fb_w:
+                        fb[yy][xx] = white
+        for t in (1, 2, 3):
+            xx = ccx + int(round(math.cos(g.pa) * t))
+            yy = ccy + int(round(math.sin(g.pa) * t))
+            if x0 < xx < x0 + size - 1 and y0 < yy < y0 + size - 1 and 0 <= xx < fb_w and 0 <= yy < fb_h:
+                fb[yy][xx] = ray
+        # bug blips; ones within 4 world-units blink for urgency
+        blink_on = int(now * 5) % 2
+        span = 2 * R + 1
+        for b in g.bugs:
+            if b.dying > 0:
+                continue
+            if not (left <= b.x < left + span and top <= b.y < top + span):
+                continue
+            if not blink_on and (b.x - g.px) ** 2 + (b.y - g.py) ** 2 < 16.0:
+                continue
+            if b.kind in ("tank", "boss"):
+                c = pack(190, 90, 240)
+            elif b.kind == "boomer":
+                c = pack(255, 120, 60)
+            else:
+                c = pack(240, 60, 50)
+            bx = max(x0 + 1, min(x0 + size - 3, x0 + 1 + int((b.x - left) * 2)))
+            by = max(y0 + 1, min(y0 + size - 3, y0 + 1 + int((b.y - top) * 2)))
+            for yy in (by, by + 1):
+                if 0 <= yy < fb_h:
+                    for xx in (bx, bx + 1):
+                        if 0 <= xx < fb_w:
+                            fb[yy][xx] = c
+
     def render_world(self, g, now):
         fb_w, fb_h = self.fb_w, self.fb_h
         half = fb_h // 2
+        # camera shake: jitter the view angle + shift rows, never touch g.pa
+        amp = g.shake_mag * min(1.0, g.shake / 0.1)
+        view_pa = g.pa + math.sin(now * 71.0) * amp * 0.004
         boost = 5 if g.muzzle > 0 else 0
         ceil = self.ceil_rows_lit if boost else self.ceil_rows
         fb = [ceil[y][:] for y in range(half)]
         fb += [[0] * fb_w for _ in range(fb_h - half)]
 
         # textured floor (scanline casting)
-        dirx, diry = math.cos(g.pa), math.sin(g.pa)
+        dirx, diry = math.cos(view_pa), math.sin(view_pa)
         planex, planey = -diry * HALF_FOV_TAN, dirx * HALF_FOV_TAN
         rd0x, rd0y = dirx - planex, diry - planey
         rd1x, rd1y = dirx + planex, diry + planey
@@ -1305,7 +1477,7 @@ class Renderer:
 
         # walls
         zbuf = [MAX_DEPTH] * fb_w
-        pa = g.pa
+        pa = view_pa
         for col in range(fb_w):
             ray = pa - FOV / 2 + FOV * col / fb_w
             dist, side, wch = cast_ray(px, py, ray)
@@ -1331,6 +1503,7 @@ class Renderer:
         draw = [((b.x - px) ** 2 + (b.y - py) ** 2, "bug", b) for b in g.bugs]
         draw += [((p.x - px) ** 2 + (p.y - py) ** 2, "pickup", p) for p in g.pickups]
         draw += [((p["x"] - px) ** 2 + (p["y"] - py) ** 2, "proj", p) for p in g.projectiles]
+        draw += [((c[0] - px) ** 2 + (c[1] - py) ** 2, "corpse", c) for c in g.corpses]
         draw.sort(key=lambda e: -e[0])
         for _, tag, obj in draw:
             if tag == "bug":
@@ -1340,17 +1513,54 @@ class Renderer:
                 diff = angle_diff(math.atan2(dy, dx), pa)
                 if abs(diff) > FOV / 2 + 0.5:
                     continue
+                dying = b.dying > 0
                 frame = int(now * (14 if b.kind == "skitter" else 7) + b.phase * 3) % 2
-                if b.flash > 0 or (b.fuse >= 0 and int(now * 12) % 2):
+                if dying:  # squash: frame 0, darkened, never the flash sprite
+                    spr = KIND_SPRITES[b.kind][0][max(0, shade_level(dist) - 8)]
+                elif b.lunge > 0:  # bite telegraph frame
+                    frame = 2
+                    if b.flash > 0 or (b.fuse >= 0 and int(now * 12) % 2):
+                        spr = FLASH_SPRITES[frame][0]
+                    else:
+                        spr = KIND_SPRITES[b.kind][frame][shade_level(dist)]
+                elif b.flash > 0 or (b.fuse >= 0 and int(now * 12) % 2):
                     spr = FLASH_SPRITES[frame][0]  # hit flash / armed-boomer strobe
                 else:
-                    lvl = shade_level(dist)
-                    spr = KIND_SPRITES[b.kind][frame][lvl]
+                    spr = KIND_SPRITES[b.kind][frame][shade_level(dist)]
                 th, tw = len(spr), len(spr[0])
                 sh = max(2, int(fb_h * 0.62 / dist))
                 sw = max(2, int(sh * tw / th * 1.05))
                 sh = max(2, int(sh * b.scale))
                 sw = max(2, int(sw * b.scale))
+                bottom = int(fb_h / 2 + fb_h / (2 * dist))
+                if dying:  # flatten into the floor, spreading wide
+                    t = b.dying / 0.3
+                    sh = max(2, int(sh * (0.15 + 0.85 * t)))
+                    sw = int(sw * (1.0 + 0.5 * (1 - t)))
+                else:
+                    age = now - b.born
+                    if age < 0.35:  # rise out of the floor on spawn
+                        sh = max(2, int(sh * (age / 0.35)))
+                        sw = max(2, int(sw * (age / 0.35)))
+                    if b.lunge > 0:  # pop toward the player
+                        sh = int(sh * 1.2)
+                        sw = int(sw * 1.2)
+                    # idle scuttle bob: alive bugs jitter on the floor line
+                    bottom += max(-2, min(2, int(math.sin(now * 9 + b.phase) * 0.04 * sh)))
+                sx_c = int((0.5 + diff / FOV) * fb_w)
+                self._blit_billboard(fb, zbuf, spr, dist, sx_c, bottom, sh, sw)
+            elif tag == "corpse":
+                cx_w, cy_w, variant, group = obj
+                dx, dy = cx_w - px, cy_w - py
+                dist = max(math.hypot(dx, dy), 0.2)
+                if dist > FOG_DIST:
+                    continue
+                diff = angle_diff(math.atan2(dy, dx), pa)
+                if abs(diff) > FOV / 2 + 0.5:
+                    continue
+                spr = SPLAT_SPRITES[group][variant][shade_level(dist)]
+                sh = max(1, int(fb_h * 0.10 / dist))
+                sw = max(2, int(sh * 11 / 4 * 1.1))
                 sx_c = int((0.5 + diff / FOV) * fb_w)
                 bottom = int(fb_h / 2 + fb_h / (2 * dist))
                 self._blit_billboard(fb, zbuf, spr, dist, sx_c, bottom, sh, sw)
@@ -1408,6 +1618,9 @@ class Renderer:
                 if 0 <= ix + 1 < fb_w:
                     row[ix + 1] = p[5]
 
+        # minimap (top-right, toggled with M)
+        self.draw_minimap(fb, g, now)
+
         # crosshair
         cx, cy = fb_w // 2, fb_h // 2
         if g.muzzle <= 0:
@@ -1418,16 +1631,30 @@ class Renderer:
             for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2), (0, 0)):
                 if 0 <= cy + oy < fb_h and 0 <= cx + ox < fb_w:
                     fb[cy + oy][cx + ox] = white
+        if g.hit_marker > 0:  # X hit-confirm; gold + larger on a kill
+            mc = pack(255, 210, 60) if g.hit_kill else pack(245, 245, 245)
+            ticks = (2, 3, 4) if g.hit_kill else (2, 3)
+            for d in ticks:
+                for ox, oy in ((-d, -d), (d, -d), (-d, d), (d, d)):
+                    if 0 <= cy + oy < fb_h and 0 <= cx + ox < fb_w:
+                        fb[cy + oy][cx + ox] = mc
 
-        # gun overlay with walk bob
+        # gun overlay with walk bob + recoil kick + shotgun pump
         normal, fire = GUN_SPRITES_BY_WEAPON[g.weapon]
-        gun = fire if g.muzzle > 0 else normal
+        t = now - g.last_shot
+        if g.muzzle > 0:
+            gun = fire
+        elif g.weapon == 1 and 0.10 <= t < 0.20:
+            gun = GUN_PUMP_SPRITE  # rack the pump after the blast
+        else:
+            gun = normal
         gh, gw = len(gun), len(gun[0])
         scale = max(1.0, fb_w / 64)
         dw, dh = int(gw * scale), int(gh * scale)
         bob = int(math.sin(g.bob) * 2)
-        gx0 = (fb_w - dw) // 2 + int(math.cos(g.bob * 0.5) * 2)
-        gy0 = fb_h - dh + bob
+        kick = max(0.0, 1.0 - t / 0.12)
+        gx0 = (fb_w - dw) // 2 + int(math.cos(g.bob * 0.5) * 2) + int(2 * kick * math.sin(g.bob))
+        gy0 = fb_h - dh + bob + int(6 * kick)
         for y in range(max(0, gy0), fb_h):
             srow = gun[min(gh - 1, (y - gy0) * gh // dh)]
             row = fb[y]
@@ -1452,6 +1679,13 @@ class Renderer:
                     row[x] = pack(((c >> 16) & 255) * inv + radd,
                                   ((c >> 8) & 255) * inv,
                                   (c & 255) * inv)
+
+        # vertical camera shake: shift whole rows (list ops, effectively free)
+        oy = max(-4, min(4, int(math.sin(now * 57.0) * amp)))
+        if oy > 0:
+            fb = [fb[0][:] for _ in range(oy)] + fb[:-oy]
+        elif oy < 0:
+            fb = fb[-oy:] + [fb[-1][:] for _ in range(-oy)]
         return fb
 
     # --- composition ------------------------------------------------------
@@ -1510,7 +1744,7 @@ class Renderer:
 
     def help_line(self, fps):
         dim = self.fg(pack(95, 95, 105))
-        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · G nade · 1-3 weapon · Q quit{' ' * 8}{fps:>2.0f} fps"
+        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · G nade · 1-3 weapon · M map · Q quit{' ' * 8}{fps:>2.0f} fps"
 
 
 def darken_fb(fb, red=False):
@@ -1693,6 +1927,9 @@ def play(term, rnd):
         now = time.time()
         dt = min(now - last, 0.1)
         last = now
+        if g.hitstop > 0:  # kill micro-freeze: world slows, rendering doesn't
+            g.hitstop -= dt
+            dt *= 0.15
         rnd.check_size()
         if rnd.cols < 50 or rnd.rows < 16:
             sys.stdout.write("\x1b[H\x1b[2J\x1b[0mTerminal too small — need at least 50x16. (Q quits)")
@@ -1726,6 +1963,8 @@ def play(term, rnd):
                 return "quit"
             elif k == "g":
                 want_nade = True
+            elif k == "m":
+                g.show_map = not g.show_map
             elif k in ("1", "2", "3"):
                 g.weapon = int(k) - 1
             elif k in ("w", "UP"):
@@ -1747,9 +1986,45 @@ def play(term, rnd):
         kills_before = sum(g.kills_by_kind.values())
 
         if want_fire and now - g.last_shot >= WEAPONS[g.weapon]["cooldown"]:
-            for bug, dist, killed in g.shoot(now):
-                if killed and handle_kill_fx(rnd, g, bug, dist, now):
-                    boss_died = True
+            events = g.shoot(now)
+            g.shake = max(g.shake, 0.06)  # muzzle flinch
+            g.shake_mag = 1.0
+            # shell eject + muzzle smoke at the gun's on-screen position
+            scale = max(1.0, rnd.fb_w / 64)
+            dh = int(13 * scale)
+            g.particles.append([rnd.fb_w / 2 + 4 * scale * 0.25, rnd.fb_h - dh * 0.6,
+                                random.uniform(18, 30), -25.0, 0.55, pack(255, 196, 32)])
+            for _ in range(3 if g.weapon == 1 else 1):
+                g.particles.append([rnd.fb_w / 2 + random.uniform(-2, 2), rnd.fb_h - dh - 2,
+                                    random.uniform(-5, 5), random.uniform(-16, -8),
+                                    random.uniform(0.4, 0.7),
+                                    random.choice((pack(120, 120, 125), pack(90, 90, 95),
+                                                   pack(150, 150, 155)))])
+            sparks = 0
+            any_kill = False
+            for bug, dist, killed in events:
+                if killed:
+                    any_kill = True
+                    g.shake = 0.14  # snappier pop on a kill
+                    g.shake_mag = 2.5
+                    g.hitstop = 0.045
+                    if handle_kill_fx(rnd, g, bug, dist, now):
+                        boss_died = True
+                elif sparks < 12:  # hit sparks on survivors, capped per frame
+                    sx, bottom, d, vis = world_to_screen(rnd, g, bug.x, bug.y)
+                    if vis:
+                        sy = bottom - (rnd.fb_h * 0.62 / d) * 0.5
+                        for _ in range(4):
+                            a = random.uniform(0, TAU)
+                            sp = random.uniform(4, 14)
+                            g.particles.append([sx, sy, math.cos(a) * sp, math.sin(a) * sp,
+                                                random.uniform(0.15, 0.3),
+                                                random.choice((pack(255, 230, 120),
+                                                               pack(255, 160, 60)))])
+                        sparks += 4
+            if events:
+                g.hit_marker = 0.22 if any_kill else 0.12
+                g.hit_kill = any_kill
 
         g.nade_cd = max(0.0, g.nade_cd - dt)
         if want_nade and g.grenades > 0 and g.nade_cd <= 0:
@@ -1799,7 +2074,7 @@ def play(term, rnd):
             if p["kind"] == "nade" and p["fuse"] is not None and p["fuse"] > 0:
                 nx, ny = p["x"], p["y"]
                 for b in g.bugs:
-                    if (b.x - nx) ** 2 + (b.y - ny) ** 2 < 0.49:
+                    if b.dying <= 0 and (b.x - nx) ** 2 + (b.y - ny) ** 2 < 0.49:
                         p["fuse"] = 0.0
                         break
 
@@ -1843,6 +2118,10 @@ def play(term, rnd):
 
         g.muzzle = max(0.0, g.muzzle - dt)
         g.bite_flash = max(0.0, g.bite_flash - dt)
+        g.shake = max(0.0, g.shake - dt)
+        g.hit_marker = max(0.0, g.hit_marker - dt)
+        if g.hit_marker <= 0:
+            g.hit_kill = False
         for p in g.particles:
             p[0] += p[2] * dt
             p[1] += p[3] * dt

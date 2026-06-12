@@ -35,6 +35,7 @@ python3 bug_doom.py
 | `Space`        | Fire                            |
 | `G` / right-click | Throw bug bomb               |
 | `1` / `2` / `3`| Switch weapon (pistol / shotgun / SMG) |
+| `M`            | Toggle minimap                  |
 | `Q`            | Quit                            |
 | `R`            | Respawn (after death)           |
 
@@ -55,6 +56,7 @@ python3 bug_doom.py
 - At 30 kills, red **boomers** charge and explode — shoot them at a distance,
   ideally inside the swarm.
 - Every 100 kills teleports the arena to a new zone — Inferno, Cryo, the Sewers.
+- Corpses pile up — wade through the goo.
 - Bugs bite when adjacent. Health regenerates slowly if you avoid bites for a few seconds.
 - Hit 0 HP and you got debugged — press `R` to respawn.
 

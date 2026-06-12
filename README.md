@@ -8,7 +8,7 @@ fog, animated pixel-art bug sprites, a pump shotgun, and particle splatter.
 
 Bugs have infested the codebase — squash them all. The game is endless;
 confetti-and-fireworks celebrations fire at 10, 20, 50, and a grand finale at
-100 kills (then every 100 after that).
+100 kills (then every 100 after that). Any key skips a celebration.
 
 No dependencies — Python 3 standard library only.
 
@@ -26,7 +26,7 @@ python3 bug_doom.py
 
 | Input          | Action                          |
 | -------------- | ------------------------------- |
-| `W` / `S`      | Move forward / back             |
+| `W` / `S` or `↑` / `↓` | Move forward / back     |
 | `A` / `D`      | Strafe left / right             |
 | `←` / `→`      | Turn                            |
 | Mouse move     | Aim                             |
@@ -37,7 +37,7 @@ python3 bug_doom.py
 | `1` / `2` / `3`| Switch weapon (pistol / shotgun / SMG) |
 | `M`            | Toggle minimap                  |
 | `P`            | Pause (session stats + options) |
-| `B`            | Toggle terminal bell (inside pause; off by default) |
+| `B`            | Toggle the celebration chime (inside pause; off by default) |
 | `Q`            | Quit                            |
 | `R`            | Respawn (after death)           |
 

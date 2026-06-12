@@ -5,6 +5,10 @@ Renders true-pixel graphics in the terminal using Unicode half-blocks (▀):
 every character cell is two vertically stacked RGB pixels, drawn with ANSI
 truecolor escapes (256-color fallback). No dependencies — stdlib only.
 
+Endless arena: weapon arsenal, grenades, five enemy kinds plus bosses,
+powerup drops, wave assaults, a rising threat level, points/combo scoring,
+arena themes every 100 kills, and persistent stats (~/.bug_doom_save.json).
+
 Controls:
     W / S  or  UP / DOWN    move forward / back
     A / D                   strafe left / right
@@ -13,6 +17,10 @@ Controls:
                             walk (scroll wheel)
     SPACE                   fire
     G / right click         throw bug bomb
+    1 / 2 / 3               switch weapon (pistol / shotgun / SMG)
+    M                       toggle minimap
+    P                       pause (R restart, B bell toggle, Q quit)
+    R                       respawn (on the game-over screen)
     Q                       quit
 
 Run:  python3 bug_doom.py
@@ -1880,6 +1888,8 @@ CONFETTI_COLORS = [
 
 
 def celebrate(term, rnd, g, title, sub, grand=False):
+    if BELL[0]:  # celebration chime (B in the pause menu; off by default)
+        sys.stdout.write("\a")
     base = darken_fb(rnd.render_world(g, time.time()))
     fb_w, fb_h = rnd.fb_w, rnd.fb_h
     duration = 5.0 if grand else 2.8

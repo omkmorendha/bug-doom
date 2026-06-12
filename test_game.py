@@ -39,10 +39,12 @@ def run_pty(cols, rows, inputs, seconds, settle=1.5):
         os.execvp(sys.executable, [sys.executable, "bug_doom.py"])
 
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    out = b""
+    # accumulate chunks in a list: quadratic bytes-concat here slows the
+    # reader, fills the pty buffer, and blocks the game's stdout writes —
+    # which depresses the very fps this harness is trying to measure
+    chunks = []
 
     def drain(timeout):
-        nonlocal out
         r, _, _ = select.select([fd], [], [], timeout)
         if r:
             try:
@@ -51,7 +53,7 @@ def run_pty(cols, rows, inputs, seconds, settle=1.5):
                 return False
             if not chunk:
                 return False
-            out += chunk
+            chunks.append(chunk)
         return True
 
     time.sleep(settle)  # let the game boot
@@ -94,7 +96,7 @@ def run_pty(cols, rows, inputs, seconds, settle=1.5):
         os.close(fd)
     except OSError:
         pass
-    return code, out.decode("utf-8", "replace")
+    return code, b"".join(chunks).decode("utf-8", "replace")
 
 
 def main():

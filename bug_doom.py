@@ -12,6 +12,7 @@ Controls:
     MOUSE                   aim (move), fire (left click / drag),
                             walk (scroll wheel)
     SPACE                   fire
+    G / right click         throw bug bomb
     Q                       quit
 
 Run:  python3 bug_doom.py
@@ -151,6 +152,14 @@ PROJ_DEFS = {
     "test": dict(life=4.0, wall="die", hit_player=0.45, player_damage=10,
                  gravity=False, friction=0.0, color=pack(150, 235, 60),
                  core=pack(220, 255, 140), size=0.05),
+    # spitter acid: slow, dodgeable, never collides with bugs
+    "glob": dict(life=4.0, wall="die", hit_player=0.45, player_damage=10,
+                 gravity=False, friction=0.0, color=pack(150, 235, 60),
+                 core=pack(220, 255, 140), size=0.05),
+    # player grenade: skids along walls to rest, detonates on its fuse
+    "nade": dict(life=8.0, wall="slide", hit_player=0.0, player_damage=0,
+                 gravity=False, friction=2.2, color=pack(26, 30, 26),
+                 core=pack(255, 40, 40), size=0.06),
 }
 
 
@@ -162,13 +171,13 @@ def tex_brick(x, y):
     return pack(150 + n, 62 + n * 0.5, 46 + n * 0.4)
 
 
-def tex_tech(x, y):
+def tex_tech(x, y, glow=(70, 215, 175)):
     if x % 16 == 0 or y % 16 == 0:
         return pack(38, 44, 56)
     if (x % 16 in (2, 13)) and (y % 16 in (2, 13)):
         return pack(170, 180, 200)
     if 13 <= y <= 15:
-        return pack(70, 215, 175)
+        return pack(*glow)
     n = _NOISE[y][x] * 8
     return pack(76 + n, 86 + n, 102 + n)
 
@@ -206,6 +215,40 @@ WALL_TEX = {
     "&": build_shaded_texture(tex_moss),
 }
 FLOOR_TEX = build_shaded_texture(tex_floor)
+
+# Arena themes: per-channel multipliers over the base textures plus ceiling
+# gradient endpoints. The arena rotates through these every 100 kills.
+THEMES = [
+    dict(name="THE CODEBASE", mults={"#": (1, 1, 1), "%": (1, 1, 1), "&": (1, 1, 1)},
+         glow=(70, 215, 175), floor=(1, 1, 1), ceil_top=(8, 10, 16), ceil_bot=(22, 26, 36)),
+    dict(name="INFERNO", mults={"#": (1.35, 0.55, 0.45), "%": (1.2, 0.6, 0.5), "&": (1.3, 0.7, 0.4)},
+         glow=(255, 140, 40), floor=(1.25, 0.7, 0.6), ceil_top=(26, 8, 6), ceil_bot=(48, 18, 12)),
+    dict(name="CRYO", mults={"#": (0.7, 0.85, 1.3), "%": (0.8, 0.95, 1.35), "&": (0.7, 0.9, 1.25)},
+         glow=(120, 220, 255), floor=(0.8, 0.9, 1.2), ceil_top=(10, 14, 26), ceil_bot=(26, 34, 52)),
+    dict(name="THE SEWERS", mults={"#": (0.7, 1.1, 0.6), "%": (0.7, 1.05, 0.7), "&": (0.75, 1.25, 0.6)},
+         glow=(150, 235, 60), floor=(0.75, 1.05, 0.65), ceil_top=(8, 14, 8), ceil_bot=(18, 30, 16)),
+]
+
+
+def tint(c, m):
+    return pack(((c >> 16) & 255) * m[0], ((c >> 8) & 255) * m[1], (c & 255) * m[2])
+
+
+def build_theme(t):
+    """Build the full shaded texture set for a theme (~40-80ms — only ever
+    called at a celebration boundary, never mid-frame)."""
+    base_fns = {
+        "#": tex_brick,
+        "%": lambda x, y: tex_tech(x, y, t["glow"]),
+        "&": tex_moss,
+    }
+    walls = {ch: build_shaded_texture(lambda x, y, ch=ch: tint(base_fns[ch](x, y), t["mults"][ch]))
+             for ch in "#%&"}
+    floor = build_shaded_texture(lambda x, y: tint(tex_floor(x, y), t["floor"]))
+    return dict(walls=walls, floor=floor)
+
+
+THEME_CACHE = {0: dict(walls=WALL_TEX, floor=FLOOR_TEX)}
 
 
 def shade_level(dist):
@@ -255,12 +298,36 @@ TANK_PALETTE = {
     "R": (255, 214, 40), "r": (70, 34, 95), "l": (56, 26, 78),
     "w": (228, 228, 198),
 }
+SKITTER_PALETTE = {
+    "k": (40, 36, 8), "g": (196, 188, 40), "h": (235, 230, 110),
+    "R": (20, 20, 24), "r": (90, 84, 20), "l": (70, 66, 16),
+    "w": (240, 240, 200),
+}
+SPITTER_PALETTE = {
+    "k": (30, 8, 8), "g": (180, 70, 40), "h": (230, 130, 60),
+    "R": (160, 255, 60), "r": (80, 30, 20), "l": (60, 24, 16),
+    "w": (235, 235, 200),
+}
+BOOMER_PALETTE = {
+    "k": (50, 8, 8), "g": (200, 50, 40), "h": (255, 120, 90),
+    "R": (255, 230, 80), "r": (90, 20, 16), "l": (70, 16, 12),
+    "w": (255, 200, 180),
+}
+BOSS_PALETTE = {
+    "k": (30, 4, 30), "g": (170, 30, 130), "h": (240, 80, 190),
+    "R": (255, 250, 120), "r": (80, 14, 60), "l": (60, 10, 46),
+    "w": (255, 230, 230),
+}
 
 # Data-driven enemy kinds: stats are copied onto each Bug at spawn so the
 # per-frame code never touches these dicts.
 BUG_KINDS = {
-    "grunt": dict(hp=1, speed=1.0, scale=1.0, bite=8),
-    "tank": dict(hp=3, speed=0.7, scale=1.0, bite=8),
+    "grunt": dict(hp=1, speed=1.0, scale=1.0, bite=7),
+    "tank": dict(hp=3, speed=0.7, scale=1.0, bite=7),
+    "skitter": dict(hp=1, speed=2.0, scale=0.55, bite=4),
+    "spitter": dict(hp=2, speed=1.0, scale=1.0, bite=7),
+    "boomer": dict(hp=2, speed=1.45, scale=1.0, bite=0),
+    "boss": dict(hp=30, speed=0.5, scale=2.6, bite=16),
 }
 
 # Death-splatter palettes per kind (default = grunt green).
@@ -286,7 +353,14 @@ def build_sprite(art, palette):
 
 BUG_SPRITES = [build_sprite(a, BUG_PALETTE) for a in BUG_FRAMES_ART]
 TANK_SPRITES = [build_sprite(a, TANK_PALETTE) for a in BUG_FRAMES_ART]
-KIND_SPRITES = {"grunt": BUG_SPRITES, "tank": TANK_SPRITES}
+KIND_SPRITES = {
+    "grunt": BUG_SPRITES,
+    "tank": TANK_SPRITES,
+    "skitter": [build_sprite(a, SKITTER_PALETTE) for a in BUG_FRAMES_ART],
+    "spitter": [build_sprite(a, SPITTER_PALETTE) for a in BUG_FRAMES_ART],
+    "boomer": [build_sprite(a, BOOMER_PALETTE) for a in BUG_FRAMES_ART],
+    "boss": [build_sprite(a, BOSS_PALETTE) for a in BUG_FRAMES_ART],
+}
 FLASH_SPRITES = [
     [[[pack(255, 90, 60) if c is not None else None for c in row] for row in lvls[SHADE_LEVELS - 1]]] * SHADE_LEVELS
     for lvls in BUG_SPRITES
@@ -416,7 +490,71 @@ HEALTH_ART = [
     "kkkkkkkkk",
     ".........",
 ]
-PICKUP_SPRITES = {"health": build_sprite(HEALTH_ART, HEALTH_PAL)}
+QUAD_PAL = {"p": (190, 70, 255), "P": (240, 180, 255)}
+QUAD_ART = [
+    "....p....",
+    "...ppp...",
+    "..pPPPp..",
+    ".pPPPPPp.",
+    "pPPPPPPPp",
+    ".pPPPPPp.",
+    "..pPPPp..",
+    "...ppp...",
+    "....p....",
+]
+SPEED_PAL = {"y": (255, 220, 40), "Y": (255, 245, 160)}
+SPEED_ART = [
+    "...Yyyy..",
+    "..Yyy....",
+    ".Yyy.....",
+    ".Yyyyyy..",
+    "...Yyy...",
+    "..Yyy....",
+    ".Yyy.....",
+    "Yyy......",
+    "Yy.......",
+]
+INVULN_PAL = {"g": (255, 200, 60), "G": (255, 240, 160)}
+INVULN_ART = [
+    "....g....",
+    "...gGg...",
+    "...gGg...",
+    "ggggGgggg",
+    ".ggGGGgg.",
+    "..ggGgg..",
+    "..gGgGg..",
+    ".gg...gg.",
+    "gg.....gg",
+]
+PICKUP_SPRITES = {
+    "health": build_sprite(HEALTH_ART, HEALTH_PAL),
+    "quad": build_sprite(QUAD_ART, QUAD_PAL),
+    "speed": build_sprite(SPEED_ART, SPEED_PAL),
+    "invuln": build_sprite(INVULN_ART, INVULN_PAL),
+}
+PICKUP_KINDS = ("health", "quad", "speed", "invuln")
+PICKUP_WEIGHTS = (45, 20, 20, 15)
+
+# Grenade billboard: dark sphere, blinking red fuse (two frames swap R<->k).
+NADE_PAL = {"k": (26, 30, 26), "h": (90, 110, 90), "R": (255, 40, 40)}
+NADE_ART_LIT = [
+    "..R..",
+    ".hkk.",
+    "hkkkk",
+    "kkkkk",
+    ".kkk.",
+]
+NADE_ART_OFF = [
+    "..k..",
+    ".hkk.",
+    "hkkkk",
+    "kkkkk",
+    ".kkk.",
+]
+# projectile kinds rendered as billboarded sprites instead of colored squares
+PROJ_SPRITES = {
+    "nade": [build_sprite(NADE_ART_LIT, NADE_PAL), build_sprite(NADE_ART_OFF, NADE_PAL)],
+}
 
 
 # --------------------------------------------------------------------------
@@ -548,9 +686,16 @@ class Bug:
         self.speed_mult = k["speed"]
         self.scale = k["scale"]
         self.bite_dmg = k["bite"]
+        self.max_hp = self.hp
         self.phase = random.uniform(0, TAU)
         self.bite_cd = 0.0
         self.flash = 0.0
+        # pack AI: half chase directly, a quarter flank each side
+        self.flank = random.choice((-1.0, 0.0, 0.0, 1.0))
+        self.spit_cd = random.uniform(1.0, 2.0)
+        self.strafe_dir = 1 if self.phase > math.pi else -1
+        self.fuse = -1.0  # boomers: negative = unarmed
+        self.summon_cd = 6.0  # bosses
 
 
 class Pickup:
@@ -577,6 +722,14 @@ class Game:
         self.last_bite = -10.0
         self.bob = 0.0
         self.celebrated = set()
+        self.next_boss = 50
+        self.boss_warn = 0.0
+        self.grenades = 2
+        self.nade_cd = 0.0
+        self.kills_since_nade = 0
+        self.quad_until = 0.0
+        self.speed_until = 0.0
+        self.invuln_until = 0.0
         # run stats (recorded to the save file at game end)
         self.start_time = time.time()
         self.shots_fired = 0
@@ -595,6 +748,9 @@ class Game:
             self.py = ny
 
     def walk(self, forward, strafe):
+        if time.time() < self.speed_until:
+            forward *= 1.6
+            strafe *= 1.6
         ang = self.pa
         dx = math.cos(ang) * forward + math.cos(ang + math.pi / 2) * strafe
         dy = math.sin(ang) * forward + math.sin(ang + math.pi / 2) * strafe
@@ -615,36 +771,171 @@ class Game:
     def pick_kind(self):
         if self.score >= 25 and random.random() < 0.25:
             return "tank"
+        elif self.score >= 30 and random.random() < 0.15:
+            return "boomer"
+        elif self.score >= 18 and random.random() < 0.20:
+            return "spitter"
+        elif self.score >= 12 and random.random() < 0.30:
+            return "skitter"
         return "grunt"
 
     def spawn_bug(self):
         pos = self.find_spawn()
-        if pos:
-            self.bugs.append(Bug(pos[0], pos[1], self.pick_kind()))
+        if not pos:
+            return
+        kind = self.pick_kind()
+        if kind == "skitter":  # skitterers arrive as a pack of 3
+            for _ in range(3):
+                x = pos[0] + random.uniform(-0.6, 0.6)
+                y = pos[1] + random.uniform(-0.6, 0.6)
+                if not is_wall(x, y):
+                    self.bugs.append(Bug(x, y, "skitter"))
+        else:
+            self.bugs.append(Bug(pos[0], pos[1], kind))
+
+    def hurt(self, dmg, now):
+        """Central player-damage funnel: invulnerability (and any future
+        armor) lives here. Returns True if damage was applied."""
+        if now < self.invuln_until:
+            return False
+        self.hp -= dmg
+        self.damage_taken += dmg
+        self.bite_flash = 0.3
+        self.last_bite = now
+        return True
+
+    def _step(self, b, ang, spd, sep):
+        """Per-axis wall-checked move (+ separation blend). Returns the
+        number of blocked axes; both blocked = corner, re-roll the weave."""
+        mx, my = math.cos(ang) * spd, math.sin(ang) * spd
+        if sep:
+            mx += sep[0]
+            my += sep[1]
+        blocked = 0
+        nx = b.x + mx
+        if is_wall(nx, b.y):
+            blocked += 1
+        else:
+            b.x = nx
+        ny = b.y + my
+        if is_wall(b.x, ny):
+            blocked += 1
+        else:
+            b.y = ny
+        if blocked == 2:
+            b.phase += 1.7
+        return blocked
+
+    def detonate_boomer(self, x, y, now, bug=None):
+        """Boomer AoE, shared by the fuse-expiry and shot-at-range paths.
+        Returns explode_at's kill list for FX/chains in the caller."""
+        if bug is not None and bug in self.bugs:
+            self.bugs.remove(bug)
+        pd = max(0.0, 24 - 12 * math.hypot(x - self.px, y - self.py))
+        kills = self.explode_at(x, y, now, bug_damage=2, bug_radius=1.8,
+                                player_damage=pd, player_radius=2.2)
+        self.muzzle = 0.12  # reuse the muzzle scene-boost as a light flash
+        return kills
 
     def update_bugs(self, dt, now):
+        """AI/movement step. Returns boomer detonations as (x, y, kills)."""
         speed = 1.0 + min(self.score * 0.015, 1.5)
-        for b in self.bugs:
+        detonations = []
+        bugs = self.bugs
+        # separation: nearest-neighbour repulsion so packs don't stack.
+        # O(n^2) with n <= 22; sqrt only inside the 0.9 radius.
+        n = len(bugs)
+        sep = [None] * n
+        for i in range(n):
+            b = bugs[i]
+            if b.kind == "boss":
+                continue
+            bx, by = b.x, b.y
+            best, bo = 1e9, None
+            for j in range(n):
+                if j == i:
+                    continue
+                o = bugs[j]
+                d2 = (bx - o.x) ** 2 + (by - o.y) ** 2
+                if d2 < best:
+                    best, bo = d2, o
+            if bo is not None and best < 0.81:
+                d = math.sqrt(best)
+                away = math.atan2(by - bo.y, bx - bo.x)
+                f = (0.9 - d) * 1.5 * dt
+                sep[i] = (math.cos(away) * f, math.sin(away) * f)
+        for i, b in enumerate(list(bugs)):
+            if detonations and b not in self.bugs:
+                continue  # chained away by an earlier detonation this frame
             b.bite_cd = max(0.0, b.bite_cd - dt)
             b.flash = max(0.0, b.flash - dt)
             dx, dy = self.px - b.x, self.py - b.y
             dist = math.hypot(dx, dy)
             ang = math.atan2(dy, dx)
-            if dist > 2.5:
-                ang += math.sin(now * 2 + b.phase) * 0.6
-            if dist > 0.5:  # stop at biting range so bugs stay shootable
-                spd = speed * b.speed_mult * dt
-                nx, ny = b.x + math.cos(ang) * spd, b.y + math.sin(ang) * spd
-                if not is_wall(nx, b.y):
-                    b.x = nx
-                if not is_wall(b.x, ny):
-                    b.y = ny
-            if dist < 0.75 and b.bite_cd <= 0:
-                self.hp -= b.bite_dmg
-                self.damage_taken += b.bite_dmg
-                b.bite_cd = 1.0
-                self.bite_flash = 0.3
-                self.last_bite = now
+            kind = b.kind
+            spd = speed * b.speed_mult * dt
+            s = sep[i] if i < n else None
+            if kind == "boomer":
+                # straight-line kamikaze: no weave/flank, arms at close range
+                if b.fuse >= 0:
+                    b.fuse -= dt
+                    if b.fuse <= 0:
+                        x, y = b.x, b.y
+                        detonations.append((x, y, self.detonate_boomer(x, y, now, bug=b)))
+                elif dist < 1.3:
+                    b.fuse = 0.45
+                else:
+                    self._step(b, ang, spd, s)
+                continue  # bite=0; the explosion is the payload
+            if kind == "spitter":
+                b.spit_cd -= dt
+                if (b.spit_cd <= 0 and 3.0 < dist < 11.0
+                        and sum(1 for p in self.projectiles if p["kind"] == "glob") < 12
+                        and cast_ray(b.x, b.y, ang)[0] > dist):
+                    a = math.atan2(dy, dx) + random.uniform(-0.05, 0.05)
+                    self.projectiles.append(dict(kind="glob", x=b.x, y=b.y,
+                                                 vx=math.cos(a) * 4.5, vy=math.sin(a) * 4.5,
+                                                 age=0.0, fuse=None))
+                    b.spit_cd = 2.2
+                    b.flash = 0.08  # white flash doubles as the wind-up tell
+                if dist > 9.0:
+                    self._step(b, ang + math.sin(now * 2 + b.phase) * 0.6, spd, s)
+                elif dist < 4.0:
+                    self._step(b, ang, -spd, s)  # back away, hold range
+                elif self._step(b, ang + math.pi / 2 * b.strafe_dir, 0.4 * dt, s):
+                    b.strafe_dir = -b.strafe_dir
+            elif kind == "boss":
+                b.summon_cd -= dt
+                if b.summon_cd <= 0:
+                    b.summon_cd = 7.0
+                    for a in (0.0, TAU / 3, 2 * TAU / 3):
+                        if len(self.bugs) >= 22:
+                            break
+                        sx, sy = b.x + math.cos(a) * 1.2, b.y + math.sin(a) * 1.2
+                        if not is_wall(sx, sy):
+                            nb = Bug(sx, sy, "grunt")
+                            nb.flash = 0.2  # materialize white-hot
+                            self.bugs.append(nb)
+                if dist > 0.5:  # straight chase: no weave/flank/separation
+                    self._step(b, ang, spd, None)
+            else:
+                # grunts / tanks / skitterers: flank wide, weave in, chase
+                if b.flank != 0 and dist > 3.0:
+                    off = 2.2 * b.flank
+                    tx = self.px - math.sin(ang) * off
+                    ty = self.py + math.cos(ang) * off
+                    ang = math.atan2(ty - b.y, tx - b.x)
+                if dist > 2.5:
+                    if kind == "skitter":
+                        ang += math.sin(now * 5 + b.phase) * 1.1
+                    else:
+                        ang += math.sin(now * 2 + b.phase) * 0.6
+                if dist > 0.5:  # stop at biting range so bugs stay shootable
+                    self._step(b, ang, spd, s)
+            if b.bite_dmg and dist < 0.75 and b.bite_cd <= 0:
+                self.hurt(b.bite_dmg, now)
+                b.bite_cd = 1.5 if kind == "boss" else 1.0
+        return detonations
 
     def shoot(self, now):
         """Fire the current weapon. Returns a list of hit events, one tuple
@@ -653,6 +944,7 @@ class Game:
         self.last_shot = now
         self.muzzle = MUZZLE_TIME
         w = WEAPONS[self.weapon]
+        dmg = w["damage"] * (4 if now < self.quad_until else 1)
         events = []
         for _ in range(w["pellets"]):
             a = self.pa + random.uniform(-w["spread"], w["spread"])
@@ -674,7 +966,7 @@ class Game:
                     best = (dist, b)
             if best:
                 bug = best[1]
-                bug.hp -= w["damage"]
+                bug.hp -= dmg
                 bug.flash = 0.15
                 if bug.hp <= 0:
                     self.bugs.remove(bug)
@@ -750,10 +1042,7 @@ class Game:
                     self.kills_by_kind[b.kind] = self.kills_by_kind.get(b.kind, 0) + 1
                     killed.append((b, math.hypot(b.x - self.px, b.y - self.py)))
         if player_damage and math.hypot(self.px - x, self.py - y) < player_radius:
-            self.hp -= player_damage
-            self.damage_taken += player_damage
-            self.bite_flash = 0.4
-            self.last_bite = now
+            self.hurt(player_damage, now)
         return killed
 
     def next_milestone(self):
@@ -797,6 +1086,8 @@ def parse_input(buf):
                     events.append(("move", x, y, code & 3))
                 elif m.group(4) == b"M" and (code & 3) == 0:
                     events.append(("click", x, y))
+                elif m.group(4) == b"M" and (code & 3) == 2:
+                    events.append(("rclick", x, y))
                 i = m.end()
                 continue
             # plain (ESC [ X) and application-mode (ESC O X) arrows
@@ -895,6 +1186,26 @@ class Renderer:
         self.pad = ""
         self._cell_cache = {}
         self._fg_cache = {}
+        self.wall_tex = WALL_TEX
+        self.floor_tex = FLOOR_TEX
+        self.ceil_top = (8, 10, 16)
+        self.ceil_bot = (22, 26, 36)
+        self.theme_idx = 0
+
+    def set_theme(self, idx):
+        idx %= len(THEMES)
+        if idx == self.theme_idx:
+            return
+        th = THEME_CACHE.get(idx)
+        if th is None:
+            th = THEME_CACHE[idx] = build_theme(THEMES[idx])
+        self.wall_tex = th["walls"]
+        self.floor_tex = th["floor"]
+        t = THEMES[idx]
+        self.ceil_top, self.ceil_bot = t["ceil_top"], t["ceil_bot"]
+        self.theme_idx = idx
+        if self.cols:  # rebuild the ceiling gradient rows
+            self.resize(self.cols, self.rows)
 
     def resize(self, cols, rows):
         self.cols, self.rows = cols, rows
@@ -903,12 +1214,13 @@ class Renderer:
         self.pad = " " * max(0, (cols - self.fb_w) // 2)
         half = self.fb_h // 2
         # ceiling gradient (normal + muzzle-lit variants)
+        (tr, tg, tb), (br, bg, bb) = self.ceil_top, self.ceil_bot
         self.ceil_rows, self.ceil_rows_lit = [], []
         for y in range(half):
             t = y / max(1, half - 1)
-            c = pack(8 + 14 * t, 10 + 16 * t, 16 + 20 * t)
-            self.ceil_rows.append([c] * self.fb_w)
-            self.ceil_rows_lit.append([pack(24 + 20 * t, 24 + 22 * t, 28 + 24 * t)] * self.fb_w)
+            r, g, b = tr + (br - tr) * t, tg + (bg - tg) * t, tb + (bb - tb) * t
+            self.ceil_rows.append([pack(r, g, b)] * self.fb_w)
+            self.ceil_rows_lit.append([pack(r + 16, g + 14, b + 12)] * self.fb_w)
         # per-row floor distance and shade level
         self.row_dist, self.row_lvl = [0.0] * self.fb_h, [0] * self.fb_h
         for y in range(half, self.fb_h):
@@ -951,16 +1263,16 @@ class Renderer:
         fb_w, fb_h = self.fb_w, self.fb_h
         th, tw = len(spr), len(spr[0])
         x0 = sx_c - sw // 2
+        yi0 = max(0, sh - bottom)  # clamp to on-screen rows up front
+        yi1 = min(sh, fb_h - bottom + sh)
         for x in range(max(0, x0), min(fb_w, x0 + sw)):
             if zbuf[x] <= dist - 0.1:
                 continue
             tx = (x - x0) * tw // sw
-            for yi in range(sh):
-                y = bottom - sh + yi
-                if 0 <= y < fb_h:
-                    c = spr[yi * th // sh][tx]
-                    if c is not None:
-                        fb[y][x] = c
+            for yi in range(yi0, yi1):
+                c = spr[yi * th // sh][tx]
+                if c is not None:
+                    fb[bottom - sh + yi][x] = c
 
     def render_world(self, g, now):
         fb_w, fb_h = self.fb_w, self.fb_h
@@ -978,9 +1290,10 @@ class Renderer:
         px, py = g.px, g.py
         row_dist, row_lvl = self.row_dist, self.row_lvl
         max_lvl = SHADE_LEVELS - 1
+        floor_tex, wall_tex = self.floor_tex, self.wall_tex
         for y in range(half, fb_h):
             d = row_dist[y]
-            tex = FLOOR_TEX[min(max_lvl, row_lvl[y] + boost)]
+            tex = floor_tex[min(max_lvl, row_lvl[y] + boost)]
             fx, fy = px + d * rd0x, py + d * rd0y
             sx = d * (rd1x - rd0x) / fb_w
             sy = d * (rd1y - rd0y) / fb_w
@@ -1006,7 +1319,7 @@ class Renderer:
             line_h = int(fb_h / perp)
             top = (fb_h - line_h) // 2
             lvl = min(max_lvl, shade_level(perp) + boost - (3 if side else 0))
-            tex = WALL_TEX[wch][max(0, lvl)]
+            tex = wall_tex[wch][max(0, lvl)]
             step = TEX_SIZE / line_h
             y0, y1 = max(0, top), min(fb_h, top + line_h)
             tpos = (y0 - top) * step
@@ -1027,9 +1340,9 @@ class Renderer:
                 diff = angle_diff(math.atan2(dy, dx), pa)
                 if abs(diff) > FOV / 2 + 0.5:
                     continue
-                frame = int(now * 7 + b.phase * 3) % 2
-                if b.flash > 0:
-                    spr = FLASH_SPRITES[frame][0]
+                frame = int(now * (14 if b.kind == "skitter" else 7) + b.phase * 3) % 2
+                if b.flash > 0 or (b.fuse >= 0 and int(now * 12) % 2):
+                    spr = FLASH_SPRITES[frame][0]  # hit flash / armed-boomer strobe
                 else:
                     lvl = shade_level(dist)
                     spr = KIND_SPRITES[b.kind][frame][lvl]
@@ -1062,6 +1375,16 @@ class Renderer:
                 dist = max(math.hypot(dx, dy), 0.2)
                 diff = angle_diff(math.atan2(dy, dx), pa)
                 if abs(diff) > FOV / 2 + 0.5:
+                    continue
+                frames = PROJ_SPRITES.get(p["kind"])
+                if frames:  # sprite-billboarded projectile (grenades)
+                    spr = frames[int(now * 8) % 2][shade_level(dist)]
+                    th, tw = len(spr), len(spr[0])
+                    sh = max(2, int(fb_h * 0.12 / dist))
+                    sw = max(2, int(sh * tw / th))
+                    sx_c = int((0.5 + diff / FOV) * fb_w)
+                    bottom = int(fb_h / 2 + fb_h / (2 * dist))
+                    self._blit_billboard(fb, zbuf, spr, dist, sx_c, bottom, sh, sw)
                     continue
                 r = max(1, int(self.fb_h * d["size"] / dist))
                 sx_c = int((0.5 + diff / FOV) * fb_w)
@@ -1159,9 +1482,12 @@ class Renderer:
         return "".join(parts)
 
     def hud_line(self, g):
+        now = time.time()
         hp = max(0, int(g.hp))
         segs = hp // 10
-        if hp > 60:
+        if now < g.invuln_until and int(now * 4) % 2:
+            bar_c = pack(255, 200, 60)  # invulnerable: blink gold
+        elif hp > 60:
             bar_c = pack(80, 220, 80)
         elif hp > 30:
             bar_c = pack(235, 200, 60)
@@ -1169,14 +1495,22 @@ class Renderer:
             bar_c = pack(240, 70, 60)
         dim = self.fg(pack(110, 110, 120))
         bar = self.fg(bar_c) + "█" * segs + self.fg(pack(50, 50, 56)) + "░" * (10 - segs)
-        return (f" {self.fg(pack(255, 210, 70))}☠ KILLS {g.score:<4}"
-                f"{dim}│ {self.fg(pack(240, 80, 80))}♥ {bar}{self.fg(bar_c)} {hp:>3}"
-                f" {dim}│ NEXT MILESTONE {self.fg(pack(120, 200, 255))}{g.next_milestone()}"
-                f" {dim}│ {self.fg(pack(200, 200, 120))}{WEAPONS[g.weapon]['name']}")
+        s = (f" {self.fg(pack(255, 210, 70))}☠ KILLS {g.score:<4}"
+             f"{dim}│ {self.fg(pack(240, 80, 80))}♥ {bar}{self.fg(bar_c)} {hp:>3}"
+             f" {dim}│ NEXT MILESTONE {self.fg(pack(120, 200, 255))}{g.next_milestone()}"
+             f" {dim}│ {self.fg(pack(200, 200, 120))}{WEAPONS[g.weapon]['name']}"
+             f" {dim}│ {self.fg(pack(160, 220, 120))}◉ x{g.grenades}")
+        if self.cols >= 90:
+            for until, tag, col in ((g.quad_until, "Q", pack(190, 70, 255)),
+                                    (g.speed_until, "S", pack(255, 220, 40)),
+                                    (g.invuln_until, "I", pack(255, 200, 60))):
+                if now < until:
+                    s += f" {self.fg(col)}{tag}{int(until - now) + 1}"
+        return s
 
     def help_line(self, fps):
         dim = self.fg(pack(95, 95, 105))
-        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · 1-3 weapon · Q quit{' ' * 8}{fps:>2.0f} fps"
+        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · G nade · 1-3 weapon · Q quit{' ' * 8}{fps:>2.0f} fps"
 
 
 def darken_fb(fb, red=False):
@@ -1299,8 +1633,11 @@ def kill_burst(rnd, g, bug, dist):
     sx, bottom, _, _ = world_to_screen(rnd, g, bug.x, bug.y)
     sh = rnd.fb_h * 0.62 / dist
     sy = bottom - sh / 2
-    goo = KIND_GOO.get(bug.kind,
-                       [pack(110, 220, 70), pack(70, 170, 50), pack(180, 240, 120), pack(255, 220, 80)])
+    if time.time() < g.quad_until:  # quad damage: everything splatters purple
+        goo = [pack(190, 70, 255), pack(120, 40, 180), pack(240, 180, 255), pack(255, 255, 255)]
+    else:
+        goo = KIND_GOO.get(bug.kind,
+                           [pack(110, 220, 70), pack(70, 170, 50), pack(180, 240, 120), pack(255, 220, 80)])
     n = max(8, int(30 / (1 + dist * 0.3)))
     for _ in range(n):
         a = random.uniform(0, TAU)
@@ -1323,6 +1660,30 @@ def explosion_burst(rnd, g, x, y, n=35, colors=None):
                             random.uniform(0.3, 0.8), random.choice(colors)])
 
 
+BOOMER_BURST = [pack(255, 200, 60), pack(255, 120, 40), pack(255, 255, 200), pack(120, 30, 20)]
+
+
+def handle_kill_fx(rnd, g, bug, dist, now):
+    """Per-kill effects shared by every kill source (gunfire, boomer chains,
+    grenades): splatter, drop roll, boomer chain detonations, boss bonus.
+    Returns True if a boss died somewhere in the chain."""
+    boss_died = bug.kind == "boss"
+    if boss_died:
+        g.score += 9  # boss is worth 10 total; the kill itself scored 1
+        kill_burst(rnd, g, bug, dist)
+    kill_burst(rnd, g, bug, dist)
+    if len(g.pickups) < 4 and random.random() < 0.18:
+        kind = random.choices(PICKUP_KINDS, weights=PICKUP_WEIGHTS)[0]
+        g.pickups.append(Pickup(bug.x, bug.y, kind, now))
+    if bug.kind == "boomer":  # a dead boomer is a free grenade
+        kills = g.detonate_boomer(bug.x, bug.y, now)
+        explosion_burst(rnd, g, bug.x, bug.y, n=70, colors=BOOMER_BURST)
+        for kb, kd in kills:
+            if handle_kill_fx(rnd, g, kb, max(kd, 0.3), now):
+                boss_died = True
+    return boss_died
+
+
 def play(term, rnd):
     g = Game()
     last = time.time()
@@ -1343,6 +1704,7 @@ def play(term, rnd):
             continue
 
         want_fire = False
+        want_nade = False
         for k in term.read_keys():
             if isinstance(k, tuple):
                 if k[0] == "move":
@@ -1354,11 +1716,16 @@ def play(term, rnd):
                 elif k[0] == "click":
                     mouse_x = k[1]
                     want_fire = True
+                elif k[0] == "rclick":
+                    mouse_x = k[1]
+                    want_nade = True
                 elif k[0] == "scroll":
                     g.walk(0.22 * k[1], 0)
             elif k == "q":
                 record_game_end(g)
                 return "quit"
+            elif k == "g":
+                want_nade = True
             elif k in ("1", "2", "3"):
                 g.weapon = int(k) - 1
             elif k in ("w", "UP"):
@@ -1376,27 +1743,83 @@ def play(term, rnd):
             elif k == " ":
                 want_fire = True
 
+        boss_died = False
+        kills_before = sum(g.kills_by_kind.values())
+
         if want_fire and now - g.last_shot >= WEAPONS[g.weapon]["cooldown"]:
             for bug, dist, killed in g.shoot(now):
-                if killed:
-                    kill_burst(rnd, g, bug, dist)
-                    if len(g.pickups) < 4 and random.random() < 0.12:
-                        g.pickups.append(Pickup(bug.x, bug.y, "health", now))
+                if killed and handle_kill_fx(rnd, g, bug, dist, now):
+                    boss_died = True
+
+        g.nade_cd = max(0.0, g.nade_cd - dt)
+        if want_nade and g.grenades > 0 and g.nade_cd <= 0:
+            g.projectiles.append(dict(kind="nade", x=g.px, y=g.py,
+                                      vx=math.cos(g.pa) * 7.0, vy=math.sin(g.pa) * 7.0,
+                                      age=0.0, fuse=1.1))
+            g.grenades -= 1
+            g.nade_cd = 0.8
+
+        # boss: warn for 2s, then spawn at the floor cell farthest away
+        boss_alive = any(b.kind == "boss" for b in g.bugs)
+        if g.score >= g.next_boss and not boss_alive and g.boss_warn <= 0:
+            g.boss_warn = 2.0
+            g.next_boss += 100  # bosses at 50, 150, 250...
+        if g.boss_warn > 0:
+            g.boss_warn -= dt
+            if g.boss_warn <= 0:
+                best = None
+                for cy in range(MAP_H):
+                    for cx in range(MAP_W):
+                        if MAP[cy][cx] == ".":
+                            d = math.hypot(cx + 0.5 - g.px, cy + 0.5 - g.py)
+                            if best is None or d > best[0]:
+                                best = (d, cx + 0.5, cy + 0.5)
+                b = Bug(best[1], best[2], "boss")
+                b.hp = b.max_hp = 30 + 10 * ((g.next_boss - 100) // 100)
+                b.summon_cd = 6.0
+                g.bugs.append(b)
+                boss_alive = True
 
         g.spawn_timer -= dt
-        cap = min(4 + g.score // 8, 14)
-        if g.spawn_timer <= 0 and len(g.bugs) < cap:
-            g.spawn_bug()
-            g.spawn_timer = max(0.6, 2.5 - g.score * 0.02)
+        cap = min(5 + g.score // 8, 18)
+        if g.spawn_timer <= 0 and g.boss_warn <= 0:
+            normal = sum(1 for b in g.bugs if b.kind != "boss")
+            if normal < cap and (not boss_alive or len(g.bugs) < 22):
+                g.spawn_bug()
+                g.spawn_timer = max(0.6, 2.5 - g.score * 0.02)
 
-        g.update_bugs(dt, now)
+        for x, y, kills in g.update_bugs(dt, now):  # boomer fuse detonations
+            explosion_burst(rnd, g, x, y, n=70, colors=BOOMER_BURST)
+            for kb, kd in kills:
+                if handle_kill_fx(rnd, g, kb, max(kd, 0.3), now):
+                    boss_died = True
+
+        # grenades cook off early when a bug wanders into the blast heart
+        for p in g.projectiles:
+            if p["kind"] == "nade" and p["fuse"] is not None and p["fuse"] > 0:
+                nx, ny = p["x"], p["y"]
+                for b in g.bugs:
+                    if (b.x - nx) ** 2 + (b.y - ny) ** 2 < 0.49:
+                        p["fuse"] = 0.0
+                        break
 
         for ev, p in g.update_projectiles(dt, now):
             if ev == "hit_player":
-                g.hp -= PROJ_DEFS[p["kind"]]["player_damage"]
-                g.bite_flash = 0.3
-                g.last_bite = now
-            # "wall"/"expired"/"fuse": content hooks go here
+                g.hurt(PROJ_DEFS[p["kind"]]["player_damage"], now)
+            elif ev == "fuse" and p["kind"] == "nade":
+                kills = g.explode_at(p["x"], p["y"], now, bug_damage=3, bug_radius=2.6,
+                                     player_damage=12, player_radius=1.6)
+                explosion_burst(rnd, g, p["x"], p["y"], n=40,
+                                colors=[pack(255, 220, 80), pack(255, 140, 40), pack(120, 120, 120)])
+                for kb, kd in kills:
+                    if handle_kill_fx(rnd, g, kb, max(kd, 0.3), now):
+                        boss_died = True
+
+        # earn a grenade every 15 kills (counter-based: robust to multi-kills)
+        g.kills_since_nade += sum(g.kills_by_kind.values()) - kills_before
+        while g.kills_since_nade >= 15:
+            g.kills_since_nade -= 15
+            g.grenades = min(4, g.grenades + 1)
 
         # pickups: expire, then collect
         g.pickups = [p for p in g.pickups if now - p.born < 12.0]
@@ -1405,6 +1828,12 @@ def play(term, rnd):
             if math.hypot(p.x - g.px, p.y - g.py) < 0.6:
                 if p.kind == "health":
                     g.hp = min(100.0, g.hp + 25)
+                elif p.kind == "quad":
+                    g.quad_until = now + 8.0
+                elif p.kind == "speed":
+                    g.speed_until = now + 8.0
+                elif p.kind == "invuln":
+                    g.invuln_until = now + 6.0
             else:
                 kept.append(p)
         g.pickups = kept
@@ -1426,21 +1855,55 @@ def play(term, rnd):
             res = game_over(term, rnd, g)
             if res == "restart":
                 g = Game()
+                rnd.set_theme(0)
                 last = time.time()
                 continue
             return "quit"
 
-        ms = None
-        if g.score in MILESTONES and g.score not in g.celebrated:
-            ms = (g.score, *MILESTONES[g.score])
-        elif g.score >= 200 and g.score % 100 == 0 and g.score not in g.celebrated:
-            ms = (g.score, "UNSTOPPABLE!", f"{g.score} BUGS AND COUNTING")
-        if ms:
-            g.celebrated.add(ms[0])
-            celebrate(term, rnd, g, ms[1], ms[2], grand=ms[0] >= 100)
+        # crossing-based milestone detection (boss kills jump score by 10)
+        cands = [m for m in MILESTONES if g.score >= m and m not in g.celebrated]
+        h = (g.score // 100) * 100
+        if h >= 200 and h not in g.celebrated:
+            cands.append(h)
+        if cands:
+            m = max(cands)
+            g.celebrated.add(m)
+            title, sub = MILESTONES.get(m) or ("UNSTOPPABLE!", f"{g.score} BUGS AND COUNTING")
+            if m >= 100 and m % 100 == 0:  # every 100 kills: rotate the arena
+                idx = (m // 100) % len(THEMES)
+                rnd.set_theme(idx)
+                sub = f"ENTERING {THEMES[idx]['name']}"
+            celebrate(term, rnd, g, title, sub, grand=m >= 100)
+            last = time.time()
+        elif boss_died:
+            celebrate(term, rnd, g, "BOSS SQUASHED!", f"{g.score} KILLS", grand=False)
             last = time.time()
 
         fb = rnd.render_world(g, now)
+        if g.boss_warn > 0 and int(now * 6) % 2:  # incoming-boss klaxon
+            wc = pack(180, 30, 30)
+            fbw, fbh = rnd.fb_w, rnd.fb_h
+            for y in (0, 1, fbh - 2, fbh - 1):
+                fb[y] = [wc] * fbw
+            for row in fb:
+                row[0] = row[1] = row[fbw - 2] = row[fbw - 1] = wc
+            draw_text(fb, fbw, fbh, "HUGE BUG INCOMING", fbh // 4, 1, pack(255, 80, 60))
+        boss = next((b for b in g.bugs if b.kind == "boss"), None)
+        if boss:  # boss HP bar across the top
+            fbw = rnd.fb_w
+            bw = int(fbw * 0.6)
+            x0 = (fbw - bw) // 2
+            border, fill, empty = pack(10, 10, 10), pack(220, 40, 200), pack(40, 16, 40)
+            fillw = int(bw * boss.hp / boss.max_hp)
+            r2, r3, r4 = fb[2], fb[3], fb[4]
+            for x in range(bw):
+                r2[x0 + x] = r4[x0 + x] = border
+                r3[x0 + x] = fill if x < fillw else empty
+            if x0 > 0:
+                r3[x0 - 1] = border
+            if x0 + bw < fbw:
+                r3[x0 + bw] = border
+            draw_text(fb, fbw, rnd.fb_h, "BOSS", 6, 1, pack(230, 150, 255))
         sys.stdout.write(rnd.compose(fb, rnd.hud_line(g), rnd.help_line(fps)))
         sys.stdout.flush()
         frame = time.time() - now

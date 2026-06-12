@@ -33,6 +33,7 @@ python3 bug_doom.py
 | Left click     | Fire (hold + drag to spray)     |
 | Scroll wheel   | Walk forward / back             |
 | `Space`        | Fire                            |
+| `1` / `2` / `3`| Switch weapon (pistol / shotgun / SMG) |
 | `Q`            | Quit                            |
 | `R`            | Respawn (after death)           |
 
@@ -40,6 +41,9 @@ python3 bug_doom.py
 
 - Bugs spawn endlessly and chase you; spawn rate and speed scale with your kill count.
 - Line up a bug with the crosshair and fire. Walls block shots.
+- Three weapons: pistol = accurate long range, shotgun = close-range burst,
+  SMG = hold-fire spray (hold click-drag or space to stream shots).
+- Squashed bugs sometimes drop health packs — walk over them.
 - After 25 kills, purple **tank bugs** appear — they take 3 hits.
 - Bugs bite when adjacent. Health regenerates slowly if you avoid bites for a few seconds.
 - Hit 0 HP and you got debugged — press `R` to respawn.

@@ -17,6 +17,7 @@ Controls:
 Run:  python3 bug_doom.py
 """
 
+import json
 import math
 import os
 import random
@@ -33,8 +34,14 @@ FOV = math.pi / 3
 HALF_FOV_TAN = math.tan(FOV / 2)
 MAX_DEPTH = 24.0
 FOG_DIST = 13.0
-FIRE_COOLDOWN = 0.22
+FIRE_COOLDOWN = 0.22  # legacy default; per-weapon cooldowns live in WEAPONS
 MUZZLE_TIME = 0.09
+
+WEAPONS = [
+    dict(name="PISTOL", cooldown=0.30, pellets=1, spread=0.0, damage=1, range=20, cone=0.45),
+    dict(name="SHOTGUN", cooldown=0.55, pellets=6, spread=0.10, damage=1, range=10, cone=0.55),
+    dict(name="SMG", cooldown=0.09, pellets=1, spread=0.035, damage=1, range=14, cone=0.40),
+]
 PLAYER_START = (16.5, 9.5, 0.0)
 TARGET_FPS = 30
 MOUSE_SENS = 0.05  # radians per terminal column of mouse travel
@@ -134,6 +141,17 @@ def pack(r, g, b):
 
 def scale_color(c, f):
     return pack(((c >> 16) & 255) * f, ((c >> 8) & 255) * f, (c & 255) * f)
+
+
+# World-space projectile definitions. Content (acid globs, grenades, ...)
+# registers kinds here: dict(life, wall="die"|"slide", hit_player=0.0_or_radius,
+# player_damage, gravity, friction, color, core, size). "test" exists only for
+# headless testing and is never spawned during play.
+PROJ_DEFS = {
+    "test": dict(life=4.0, wall="die", hit_player=0.45, player_damage=10,
+                 gravity=False, friction=0.0, color=pack(150, 235, 60),
+                 core=pack(220, 255, 140), size=0.05),
+}
 
 
 def tex_brick(x, y):
@@ -238,6 +256,18 @@ TANK_PALETTE = {
     "w": (228, 228, 198),
 }
 
+# Data-driven enemy kinds: stats are copied onto each Bug at spawn so the
+# per-frame code never touches these dicts.
+BUG_KINDS = {
+    "grunt": dict(hp=1, speed=1.0, scale=1.0, bite=8),
+    "tank": dict(hp=3, speed=0.7, scale=1.0, bite=8),
+}
+
+# Death-splatter palettes per kind (default = grunt green).
+KIND_GOO = {
+    "tank": [pack(148, 62, 200), pack(70, 34, 95), pack(188, 110, 236), pack(255, 214, 40)],
+}
+
 
 def build_sprite(art, palette):
     """[level][row][col] -> packed color or None (transparent)."""
@@ -256,6 +286,7 @@ def build_sprite(art, palette):
 
 BUG_SPRITES = [build_sprite(a, BUG_PALETTE) for a in BUG_FRAMES_ART]
 TANK_SPRITES = [build_sprite(a, TANK_PALETTE) for a in BUG_FRAMES_ART]
+KIND_SPRITES = {"grunt": BUG_SPRITES, "tank": TANK_SPRITES}
 FLASH_SPRITES = [
     [[[pack(255, 90, 60) if c is not None else None for c in row] for row in lvls[SHADE_LEVELS - 1]]] * SHADE_LEVELS
     for lvls in BUG_SPRITES
@@ -298,12 +329,94 @@ GUN_FIRE_ART = [
 ]
 
 
+PISTOL_ART = [
+    "...kkkkk...",
+    "...kgggk...",
+    "...kglgk...",
+    "...kglgk...",
+    "..kkglgkk..",
+    "..kdglgdk..",
+    ".kkdgggdkk.",
+    ".kdddddddk.",
+    ".kdddddddk.",
+    "kdddddddddk",
+    "kdddddddddk",
+]
+PISTOL_FIRE_ART = [
+    "...yYWYy...",
+    ".yYWWWWWYy.",
+    "..yYWWWYy..",
+    "...kYWYk...",
+    "..kkglgkk..",
+    "..kdglgdk..",
+    ".kkdgggdkk.",
+    ".kdddddddk.",
+    ".kdddddddk.",
+    "kdddddddddk",
+    "kdddddddddk",
+]
+SMG_ART = [
+    "......kkkkk......",
+    "......kgggk......",
+    "......kglgk......",
+    "......kglgk......",
+    ".....kkglgkk.....",
+    ".....kdkdkdk.....",
+    "....kkdkdkdkk....",
+    "...kkkdkdkdkk....",
+    "...kkkddddddkk...",
+    "...kkkddddddddk..",
+    "...kkkdddddddddk.",
+    "..kdddddddddddk..",
+    ".kdddddddddddddk.",
+]
+SMG_FIRE_ART = [
+    ".......yYWYy.....",
+    ".....yYWWWWWYy...",
+    "....yYWWWWWWWYy..",
+    ".....yYWWWWWYy...",
+    ".....kkYWWYkk....",
+    ".....kdkdkdk.....",
+    "....kkdkdkdkk....",
+    "...kkkdkdkdkk....",
+    "...kkkddddddkk...",
+    "...kkkddddddddk..",
+    "...kkkdddddddddk.",
+    "..kdddddddddddk..",
+    ".kdddddddddddddk.",
+]
+
+
 def build_overlay(art, palette):
     return [[pack(*palette[ch]) if ch in palette else None for ch in line] for line in art]
 
 
 GUN_SPRITE = build_overlay(GUN_ART, GUN_PALETTE)
 GUN_FIRE_SPRITE = build_overlay(GUN_FIRE_ART, GUN_PALETTE)
+PISTOL_SPRITE = build_overlay(PISTOL_ART, GUN_PALETTE)
+PISTOL_FIRE_SPRITE = build_overlay(PISTOL_FIRE_ART, GUN_PALETTE)
+SMG_SPRITE = build_overlay(SMG_ART, GUN_PALETTE)
+SMG_FIRE_SPRITE = build_overlay(SMG_FIRE_ART, GUN_PALETTE)
+GUN_SPRITES_BY_WEAPON = [
+    (PISTOL_SPRITE, PISTOL_FIRE_SPRITE),
+    (GUN_SPRITE, GUN_FIRE_SPRITE),
+    (SMG_SPRITE, SMG_FIRE_SPRITE),
+]
+
+# Pickup art (billboarded in-world like bug sprites)
+HEALTH_PAL = {"r": (200, 40, 40), "w": (255, 255, 255), "k": (40, 10, 10)}
+HEALTH_ART = [
+    ".........",
+    "kkkkkkkkk",
+    "krrrwrrrk",
+    "krrrwrrrk",
+    "kwwwwwwwk",
+    "krrrwrrrk",
+    "krrrwrrrk",
+    "kkkkkkkkk",
+    ".........",
+]
+PICKUP_SPRITES = {"health": build_sprite(HEALTH_ART, HEALTH_PAL)}
 
 
 # --------------------------------------------------------------------------
@@ -383,17 +496,68 @@ def draw_text(fb, fb_w, fb_h, text, cy, scale, color):
 
 
 # --------------------------------------------------------------------------
+# Persistence (~/.bug_doom_save.json) — must never crash the game
+# --------------------------------------------------------------------------
+
+SAVE_PATH = os.path.expanduser("~/.bug_doom_save.json")
+PREV_HIGH = [0]  # high score loaded at startup; new Games copy it
+
+
+def load_save():
+    try:
+        with open(SAVE_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_save(data):
+    try:
+        tmp = SAVE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, SAVE_PATH)
+    except Exception:
+        pass
+
+
+def record_game_end(g):
+    """Merge this run's stats into the save file. Idempotent per Game."""
+    if g.stats_recorded:
+        return
+    g.stats_recorded = True
+    data = load_save()  # read-modify-write: never clobber unknown keys
+    data["high_kills"] = max(data.get("high_kills", 0), g.score)
+    data["total_kills"] = data.get("total_kills", 0) + g.score
+    data["games_played"] = data.get("games_played", 0) + 1
+    data["longest_run_s"] = max(data.get("longest_run_s", 0.0), time.time() - g.start_time)
+    write_save(data)
+
+
+# --------------------------------------------------------------------------
 # Game logic
 # --------------------------------------------------------------------------
 
 class Bug:
-    def __init__(self, x, y, tank=False):
+    def __init__(self, x, y, kind="grunt"):
         self.x, self.y = x, y
-        self.tank = tank
-        self.hp = 3 if tank else 1
+        self.kind = kind
+        k = BUG_KINDS[kind]
+        self.hp = k["hp"]
+        self.speed_mult = k["speed"]
+        self.scale = k["scale"]
+        self.bite_dmg = k["bite"]
         self.phase = random.uniform(0, TAU)
         self.bite_cd = 0.0
         self.flash = 0.0
+
+
+class Pickup:
+    def __init__(self, x, y, kind, born):
+        self.x, self.y = x, y
+        self.kind = kind
+        self.born = born
 
 
 class Game:
@@ -402,14 +566,26 @@ class Game:
         self.hp = 100.0
         self.score = 0
         self.bugs = []
+        self.pickups = []
+        self.projectiles = []  # dicts: kind, x, y, vx, vy, age, fuse
         self.particles = []  # [x, y, vx, vy, life, color]
         self.spawn_timer = 0.0
         self.last_shot = -1.0
+        self.weapon = 1  # shotgun default
         self.muzzle = 0.0
         self.bite_flash = 0.0
         self.last_bite = -10.0
         self.bob = 0.0
         self.celebrated = set()
+        # run stats (recorded to the save file at game end)
+        self.start_time = time.time()
+        self.shots_fired = 0
+        self.shots_hit = 0
+        self.damage_taken = 0.0
+        self.kills_by_kind = {}
+        self.best_combo = 0  # maintained by a future combo system
+        self.stats_recorded = False
+        self.prev_high = PREV_HIGH[0]
 
     def try_move(self, nx, ny):
         r = 0.2
@@ -425,17 +601,26 @@ class Game:
         self.try_move(self.px + dx, self.py + dy)
         self.bob += 0.5
 
-    def spawn_bug(self):
-        for _ in range(40):
+    def find_spawn(self, min_player_dist=6.0, attempts=40):
+        for _ in range(attempts):
             x = random.uniform(1.5, MAP_W - 1.5)
             y = random.uniform(1.5, MAP_H - 1.5)
             if is_wall(x, y):
                 continue
-            if math.hypot(x - self.px, y - self.py) < 6:
+            if math.hypot(x - self.px, y - self.py) < min_player_dist:
                 continue
-            tank = self.score >= 25 and random.random() < 0.25
-            self.bugs.append(Bug(x, y, tank))
-            return
+            return x, y
+        return None
+
+    def pick_kind(self):
+        if self.score >= 25 and random.random() < 0.25:
+            return "tank"
+        return "grunt"
+
+    def spawn_bug(self):
+        pos = self.find_spawn()
+        if pos:
+            self.bugs.append(Bug(pos[0], pos[1], self.pick_kind()))
 
     def update_bugs(self, dt, now):
         speed = 1.0 + min(self.score * 0.015, 1.5)
@@ -448,45 +633,128 @@ class Game:
             if dist > 2.5:
                 ang += math.sin(now * 2 + b.phase) * 0.6
             if dist > 0.5:  # stop at biting range so bugs stay shootable
-                spd = speed * (0.7 if b.tank else 1.0) * dt
+                spd = speed * b.speed_mult * dt
                 nx, ny = b.x + math.cos(ang) * spd, b.y + math.sin(ang) * spd
                 if not is_wall(nx, b.y):
                     b.x = nx
                 if not is_wall(b.x, ny):
                     b.y = ny
             if dist < 0.75 and b.bite_cd <= 0:
-                self.hp -= 8
+                self.hp -= b.bite_dmg
+                self.damage_taken += b.bite_dmg
                 b.bite_cd = 1.0
                 self.bite_flash = 0.3
                 self.last_bite = now
 
     def shoot(self, now):
-        """Returns (killed_bug, dist) — (None, None) on a miss or non-lethal hit."""
+        """Fire the current weapon. Returns a list of hit events, one tuple
+        (bug, dist, killed_bool) per pellet that connected (empty = whiff)."""
+        self.shots_fired += 1
         self.last_shot = now
         self.muzzle = MUZZLE_TIME
-        best = None
-        for b in self.bugs:
-            dx, dy = b.x - self.px, b.y - self.py
-            dist = math.hypot(dx, dy)
-            if dist > 18 or dist < 0.1:
-                continue
-            ang = math.atan2(dy, dx)
-            if abs(angle_diff(ang, self.pa)) > max(math.atan2(0.45, dist), 0.04):
-                continue
-            wall_d, _, _ = cast_ray(self.px, self.py, ang)
-            if wall_d < dist - 0.2:
-                continue
-            if best is None or dist < best[0]:
-                best = (dist, b)
-        if best:
-            bug = best[1]
-            bug.hp -= 1
-            bug.flash = 0.15
-            if bug.hp <= 0:
-                self.bugs.remove(bug)
-                self.score += 1
-                return bug, best[0]
-        return None, None
+        w = WEAPONS[self.weapon]
+        events = []
+        for _ in range(w["pellets"]):
+            a = self.pa + random.uniform(-w["spread"], w["spread"])
+            best = None
+            for b in self.bugs:
+                if b.hp <= 0:
+                    continue
+                dx, dy = b.x - self.px, b.y - self.py
+                dist = math.hypot(dx, dy)
+                if dist > w["range"] or dist < 0.1:
+                    continue
+                ang = math.atan2(dy, dx)
+                if abs(angle_diff(ang, a)) > max(math.atan2(w["cone"] * b.scale, dist), 0.04):
+                    continue
+                wall_d, _, _ = cast_ray(self.px, self.py, ang)
+                if wall_d < dist - 0.2:
+                    continue
+                if best is None or dist < best[0]:
+                    best = (dist, b)
+            if best:
+                bug = best[1]
+                bug.hp -= w["damage"]
+                bug.flash = 0.15
+                if bug.hp <= 0:
+                    self.bugs.remove(bug)
+                    self.score += 1
+                    self.kills_by_kind[bug.kind] = self.kills_by_kind.get(bug.kind, 0) + 1
+                    events.append((bug, best[0], True))
+                else:
+                    events.append((bug, best[0], False))
+        if events:
+            self.shots_hit += 1  # once per trigger pull, not per pellet
+        return events
+
+    def update_projectiles(self, dt, now):
+        """Integrate world-space projectiles. Returns a list of events
+        ("wall"|"expired"|"hit_player"|"fuse", proj) for the caller."""
+        events = []
+        dead = []
+        for p in self.projectiles:
+            d = PROJ_DEFS[p["kind"]]
+            if d["friction"]:
+                f = 1 - d["friction"] * dt
+                p["vx"] *= f
+                p["vy"] *= f
+            alive = True
+            nx = p["x"] + p["vx"] * dt
+            if is_wall(nx, p["y"]):
+                if d["wall"] == "die":
+                    alive = False
+                    events.append(("wall", p))
+                else:  # slide
+                    p["vx"] = 0.0
+            else:
+                p["x"] = nx
+            if alive:
+                ny = p["y"] + p["vy"] * dt
+                if is_wall(p["x"], ny):
+                    if d["wall"] == "die":
+                        alive = False
+                        events.append(("wall", p))
+                    else:
+                        p["vy"] = 0.0
+                else:
+                    p["y"] = ny
+            p["age"] += dt
+            if alive and p["age"] > d["life"]:
+                alive = False
+                events.append(("expired", p))
+            if alive and p.get("fuse") is not None:
+                p["fuse"] -= dt
+                if p["fuse"] <= 0:
+                    alive = False
+                    events.append(("fuse", p))
+            if alive and d["hit_player"] and \
+                    math.hypot(p["x"] - self.px, p["y"] - self.py) < d["hit_player"]:
+                alive = False
+                events.append(("hit_player", p))
+            if not alive:
+                dead.append(p)
+        for p in dead:
+            self.projectiles.remove(p)
+        return events
+
+    def explode_at(self, x, y, now, bug_damage, bug_radius, player_damage, player_radius):
+        """AoE damage. Returns [(killed_bug, dist_from_player), ...]."""
+        killed = []
+        for b in list(self.bugs):
+            if math.hypot(b.x - x, b.y - y) < bug_radius:
+                b.hp -= bug_damage
+                b.flash = 0.15
+                if b.hp <= 0 and b in self.bugs:
+                    self.bugs.remove(b)
+                    self.score += 1
+                    self.kills_by_kind[b.kind] = self.kills_by_kind.get(b.kind, 0) + 1
+                    killed.append((b, math.hypot(b.x - self.px, b.y - self.py)))
+        if player_damage and math.hypot(self.px - x, self.py - y) < player_radius:
+            self.hp -= player_damage
+            self.damage_taken += player_damage
+            self.bite_flash = 0.4
+            self.last_bite = now
+        return killed
 
     def next_milestone(self):
         for m in sorted(MILESTONES):
@@ -678,6 +946,22 @@ class Renderer:
 
     # --- world rendering ------------------------------------------------
 
+    def _blit_billboard(self, fb, zbuf, spr, dist, sx_c, bottom, sh, sw):
+        """Depth-tested sprite blit anchored at `bottom`, centered on sx_c."""
+        fb_w, fb_h = self.fb_w, self.fb_h
+        th, tw = len(spr), len(spr[0])
+        x0 = sx_c - sw // 2
+        for x in range(max(0, x0), min(fb_w, x0 + sw)):
+            if zbuf[x] <= dist - 0.1:
+                continue
+            tx = (x - x0) * tw // sw
+            for yi in range(sh):
+                y = bottom - sh + yi
+                if 0 <= y < fb_h:
+                    c = spr[yi * th // sh][tx]
+                    if c is not None:
+                        fb[y][x] = c
+
     def render_world(self, g, now):
         fb_w, fb_h = self.fb_w, self.fb_h
         half = fb_h // 2
@@ -730,36 +1014,66 @@ class Renderer:
                 fb[y][col] = tex[((int(tpos) & 31) << 5) | tx]
                 tpos += step
 
-        # bug sprites, far to near
-        order = sorted(g.bugs, key=lambda b: -((b.x - px) ** 2 + (b.y - py) ** 2))
-        for b in order:
-            dx, dy = b.x - px, b.y - py
-            dist = max(math.hypot(dx, dy), 0.2)
-            diff = angle_diff(math.atan2(dy, dx), pa)
-            if abs(diff) > FOV / 2 + 0.5:
-                continue
-            frame = int(now * 7 + b.phase * 3) % 2
-            if b.flash > 0:
-                spr = FLASH_SPRITES[frame][0]
-            else:
-                lvl = shade_level(dist)
-                spr = (TANK_SPRITES if b.tank else BUG_SPRITES)[frame][lvl]
-            th, tw = len(spr), len(spr[0])
-            sh = max(2, int(fb_h * 0.62 / dist))
-            sw = max(2, int(sh * tw / th * 1.05))
-            sx_c = int((0.5 + diff / FOV) * fb_w)
-            bottom = int(fb_h / 2 + fb_h / (2 * dist))
-            x0 = sx_c - sw // 2
-            for x in range(max(0, x0), min(fb_w, x0 + sw)):
-                if zbuf[x] <= dist - 0.1:
+        # billboard entities (bugs, pickups, projectiles), far to near
+        draw = [((b.x - px) ** 2 + (b.y - py) ** 2, "bug", b) for b in g.bugs]
+        draw += [((p.x - px) ** 2 + (p.y - py) ** 2, "pickup", p) for p in g.pickups]
+        draw += [((p["x"] - px) ** 2 + (p["y"] - py) ** 2, "proj", p) for p in g.projectiles]
+        draw.sort(key=lambda e: -e[0])
+        for _, tag, obj in draw:
+            if tag == "bug":
+                b = obj
+                dx, dy = b.x - px, b.y - py
+                dist = max(math.hypot(dx, dy), 0.2)
+                diff = angle_diff(math.atan2(dy, dx), pa)
+                if abs(diff) > FOV / 2 + 0.5:
                     continue
-                tx = (x - x0) * tw // sw
-                for yi in range(sh):
-                    y = bottom - sh + yi
-                    if 0 <= y < fb_h:
-                        c = spr[yi * th // sh][tx]
-                        if c is not None:
-                            fb[y][x] = c
+                frame = int(now * 7 + b.phase * 3) % 2
+                if b.flash > 0:
+                    spr = FLASH_SPRITES[frame][0]
+                else:
+                    lvl = shade_level(dist)
+                    spr = KIND_SPRITES[b.kind][frame][lvl]
+                th, tw = len(spr), len(spr[0])
+                sh = max(2, int(fb_h * 0.62 / dist))
+                sw = max(2, int(sh * tw / th * 1.05))
+                sh = max(2, int(sh * b.scale))
+                sw = max(2, int(sw * b.scale))
+                sx_c = int((0.5 + diff / FOV) * fb_w)
+                bottom = int(fb_h / 2 + fb_h / (2 * dist))
+                self._blit_billboard(fb, zbuf, spr, dist, sx_c, bottom, sh, sw)
+            elif tag == "pickup":
+                p = obj
+                dx, dy = p.x - px, p.y - py
+                dist = max(math.hypot(dx, dy), 0.2)
+                diff = angle_diff(math.atan2(dy, dx), pa)
+                if abs(diff) > FOV / 2 + 0.5:
+                    continue
+                spr = PICKUP_SPRITES[p.kind][shade_level(dist)]
+                th, tw = len(spr), len(spr[0])
+                sh = max(2, int(fb_h * 0.30 / dist))
+                sw = max(2, int(sh * tw / th))
+                sx_c = int((0.5 + diff / FOV) * fb_w)
+                bottom = int(fb_h / 2 + fb_h / (2 * dist)) - int(math.sin(now * 3 + p.born) * 2)
+                self._blit_billboard(fb, zbuf, spr, dist, sx_c, bottom, sh, sw)
+            elif tag == "proj":
+                p = obj
+                d = PROJ_DEFS[p["kind"]]
+                dx, dy = p["x"] - px, p["y"] - py
+                dist = max(math.hypot(dx, dy), 0.2)
+                diff = angle_diff(math.atan2(dy, dx), pa)
+                if abs(diff) > FOV / 2 + 0.5:
+                    continue
+                r = max(1, int(self.fb_h * d["size"] / dist))
+                sx_c = int((0.5 + diff / FOV) * fb_w)
+                cy_p = int(self.fb_h / 2 + self.fb_h / (2 * dist) - self.fb_h * 0.18 / dist)
+                color, core = d["color"], d["core"]
+                for x in range(max(0, sx_c - r), min(fb_w, sx_c + r + 1)):
+                    if zbuf[x] <= dist - 0.1:
+                        continue
+                    for y in range(max(0, cy_p - r), min(fb_h, cy_p + r + 1)):
+                        fb[y][x] = color
+                if 0 <= sx_c < fb_w and 0 <= cy_p < fb_h and zbuf[sx_c] > dist - 0.1:
+                    fb[cy_p][sx_c] = core
 
         # particles (screen-space)
         for p in g.particles:
@@ -783,7 +1097,8 @@ class Renderer:
                     fb[cy + oy][cx + ox] = white
 
         # gun overlay with walk bob
-        gun = GUN_FIRE_SPRITE if g.muzzle > 0 else GUN_SPRITE
+        normal, fire = GUN_SPRITES_BY_WEAPON[g.weapon]
+        gun = fire if g.muzzle > 0 else normal
         gh, gw = len(gun), len(gun[0])
         scale = max(1.0, fb_w / 64)
         dw, dh = int(gw * scale), int(gh * scale)
@@ -856,11 +1171,12 @@ class Renderer:
         bar = self.fg(bar_c) + "█" * segs + self.fg(pack(50, 50, 56)) + "░" * (10 - segs)
         return (f" {self.fg(pack(255, 210, 70))}☠ KILLS {g.score:<4}"
                 f"{dim}│ {self.fg(pack(240, 80, 80))}♥ {bar}{self.fg(bar_c)} {hp:>3}"
-                f" {dim}│ NEXT MILESTONE {self.fg(pack(120, 200, 255))}{g.next_milestone()}")
+                f" {dim}│ NEXT MILESTONE {self.fg(pack(120, 200, 255))}{g.next_milestone()}"
+                f" {dim}│ {self.fg(pack(200, 200, 120))}{WEAPONS[g.weapon]['name']}")
 
     def help_line(self, fps):
         dim = self.fg(pack(95, 95, 105))
-        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · Q quit{' ' * 8}{fps:>2.0f} fps"
+        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · 1-3 weapon · Q quit{' ' * 8}{fps:>2.0f} fps"
 
 
 def darken_fb(fb, red=False):
@@ -968,18 +1284,43 @@ def game_over(term, rnd, g):
 # Main loop
 # --------------------------------------------------------------------------
 
-def kill_burst(rnd, g, bug, dist):
-    diff = angle_diff(math.atan2(bug.y - g.py, bug.x - g.px), g.pa)
+def world_to_screen(rnd, g, x, y):
+    """Project a world point to (screen_x, sprite_bottom_y, dist, visible)."""
+    dx, dy = x - g.px, y - g.py
+    dist = max(math.hypot(dx, dy), 0.2)
+    diff = angle_diff(math.atan2(dy, dx), g.pa)
     sx = (0.5 + diff / FOV) * rnd.fb_w
+    bottom = rnd.fb_h / 2 + rnd.fb_h / (2 * dist)
+    visible = abs(diff) < FOV / 2 + 0.5
+    return sx, bottom, dist, visible
+
+
+def kill_burst(rnd, g, bug, dist):
+    sx, bottom, _, _ = world_to_screen(rnd, g, bug.x, bug.y)
     sh = rnd.fb_h * 0.62 / dist
-    sy = rnd.fb_h / 2 + rnd.fb_h / (2 * dist) - sh / 2
-    goo = [pack(110, 220, 70), pack(70, 170, 50), pack(180, 240, 120), pack(255, 220, 80)]
+    sy = bottom - sh / 2
+    goo = KIND_GOO.get(bug.kind,
+                       [pack(110, 220, 70), pack(70, 170, 50), pack(180, 240, 120), pack(255, 220, 80)])
     n = max(8, int(30 / (1 + dist * 0.3)))
     for _ in range(n):
         a = random.uniform(0, TAU)
         sp = random.uniform(6, 40) / (1 + dist * 0.15)
         g.particles.append([sx, sy, math.cos(a) * sp, math.sin(a) * sp - 12,
                             random.uniform(0.3, 0.8), random.choice(goo)])
+
+
+def explosion_burst(rnd, g, x, y, n=35, colors=None):
+    if colors is None:
+        colors = [pack(255, 200, 60), pack(255, 140, 40), pack(255, 255, 200), pack(120, 120, 120)]
+    sx, bottom, dist, visible = world_to_screen(rnd, g, x, y)
+    if not visible:
+        return
+    sy = bottom - (rnd.fb_h * 0.4 / dist) / 2
+    for _ in range(n):
+        a = random.uniform(0, TAU)
+        sp = random.uniform(6, 46) / (1 + dist * 0.15)
+        g.particles.append([sx, sy, math.cos(a) * sp, math.sin(a) * sp - 12,
+                            random.uniform(0.3, 0.8), random.choice(colors)])
 
 
 def play(term, rnd):
@@ -996,6 +1337,7 @@ def play(term, rnd):
             sys.stdout.write("\x1b[H\x1b[2J\x1b[0mTerminal too small — need at least 50x16. (Q quits)")
             sys.stdout.flush()
             if "q" in term.read_keys():
+                record_game_end(g)
                 return "quit"
             time.sleep(0.2)
             continue
@@ -1015,7 +1357,10 @@ def play(term, rnd):
                 elif k[0] == "scroll":
                     g.walk(0.22 * k[1], 0)
             elif k == "q":
+                record_game_end(g)
                 return "quit"
+            elif k in ("1", "2", "3"):
+                g.weapon = int(k) - 1
             elif k in ("w", "UP"):
                 g.walk(0.35, 0)
             elif k in ("s", "DOWN"):
@@ -1031,10 +1376,12 @@ def play(term, rnd):
             elif k == " ":
                 want_fire = True
 
-        if want_fire and now - g.last_shot >= FIRE_COOLDOWN:
-            killed, kd = g.shoot(now)
-            if killed:
-                kill_burst(rnd, g, killed, kd)
+        if want_fire and now - g.last_shot >= WEAPONS[g.weapon]["cooldown"]:
+            for bug, dist, killed in g.shoot(now):
+                if killed:
+                    kill_burst(rnd, g, bug, dist)
+                    if len(g.pickups) < 4 and random.random() < 0.12:
+                        g.pickups.append(Pickup(bug.x, bug.y, "health", now))
 
         g.spawn_timer -= dt
         cap = min(4 + g.score // 8, 14)
@@ -1043,6 +1390,24 @@ def play(term, rnd):
             g.spawn_timer = max(0.6, 2.5 - g.score * 0.02)
 
         g.update_bugs(dt, now)
+
+        for ev, p in g.update_projectiles(dt, now):
+            if ev == "hit_player":
+                g.hp -= PROJ_DEFS[p["kind"]]["player_damage"]
+                g.bite_flash = 0.3
+                g.last_bite = now
+            # "wall"/"expired"/"fuse": content hooks go here
+
+        # pickups: expire, then collect
+        g.pickups = [p for p in g.pickups if now - p.born < 12.0]
+        kept = []
+        for p in g.pickups:
+            if math.hypot(p.x - g.px, p.y - g.py) < 0.6:
+                if p.kind == "health":
+                    g.hp = min(100.0, g.hp + 25)
+            else:
+                kept.append(p)
+        g.pickups = kept
 
         if now - g.last_bite > 3 and g.hp < 100:
             g.hp = min(100.0, g.hp + 2 * dt)
@@ -1057,6 +1422,7 @@ def play(term, rnd):
         g.particles = [p for p in g.particles if p[4] > 0]
 
         if g.hp <= 0:
+            record_game_end(g)
             res = game_over(term, rnd, g)
             if res == "restart":
                 g = Game()
@@ -1090,6 +1456,8 @@ def main():
         with Term() as term:
             rnd = Renderer()
             rnd.check_size()
+            save_data = load_save()
+            PREV_HIGH[0] = save_data.get("high_kills", 0)
             play(term, rnd)
     except KeyboardInterrupt:
         pass

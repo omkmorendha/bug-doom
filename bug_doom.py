@@ -9,6 +9,8 @@ Controls:
     W / S  or  UP / DOWN    move forward / back
     A / D                   strafe left / right
     LEFT / RIGHT            turn
+    MOUSE                   aim (move), fire (left click / drag),
+                            walk (scroll wheel)
     SPACE                   fire
     Q                       quit
 
@@ -18,6 +20,7 @@ Run:  python3 bug_doom.py
 import math
 import os
 import random
+import re
 import select
 import shutil
 import sys
@@ -34,6 +37,7 @@ FIRE_COOLDOWN = 0.22
 MUZZLE_TIME = 0.09
 PLAYER_START = (16.5, 9.5, 0.0)
 TARGET_FPS = 30
+MOUSE_SENS = 0.05  # radians per terminal column of mouse travel
 
 # Wall cells: '#' brick, '%' tech panel, '&' mossy stone. '.' is floor.
 MAP = [
@@ -495,36 +499,72 @@ class Game:
 # Terminal I/O
 # --------------------------------------------------------------------------
 
+ARROW_KEYS = {0x41: "UP", 0x42: "DOWN", 0x43: "RIGHT", 0x44: "LEFT"}
+# SGR mouse report: ESC [ < code ; col ; row M (press/motion) or m (release)
+MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+PARTIAL_ESC_RE = re.compile(rb"\x1b(\[(<[\d;]*)?)?$")
+
+
+def parse_input(buf):
+    """Parse raw stdin bytes -> (events, leftover_bytes).
+
+    Events are key strings ('w', ' ', 'LEFT', ...) or mouse tuples:
+    ('move', col, row, button_bits), ('click', col, row), ('scroll', +1/-1).
+    """
+    events = []
+    i, n = 0, len(buf)
+    while i < n:
+        b = buf[i]
+        if b == 0x1B:
+            m = MOUSE_RE.match(buf, i)
+            if m:
+                code, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if code & 64:
+                    events.append(("scroll", 1 if (code & 1) == 0 else -1))
+                elif code & 32:
+                    events.append(("move", x, y, code & 3))
+                elif m.group(4) == b"M" and (code & 3) == 0:
+                    events.append(("click", x, y))
+                i = m.end()
+                continue
+            if i + 2 < n and buf[i + 1] == 0x5B and buf[i + 2] in ARROW_KEYS:
+                events.append(ARROW_KEYS[buf[i + 2]])
+                i += 3
+                continue
+            # keep a split escape sequence for the next read; drop a bare ESC
+            if n - i >= 2 and n - i < 24 and PARTIAL_ESC_RE.match(buf, i):
+                break
+            i += 1
+            continue
+        events.append(chr(b).lower())
+        i += 1
+    return events, buf[i:]
+
+
 class Term:
     def __enter__(self):
         self.fd = sys.stdin.fileno()
         self.old = termios.tcgetattr(self.fd)
+        self.buf = b""
         tty.setcbreak(self.fd)
-        sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J")
+        # alt screen, hide cursor, no autowrap, SGR any-motion mouse tracking
+        sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1003h\x1b[?1006h\x1b[2J")
         sys.stdout.flush()
         return self
 
     def __exit__(self, *exc):
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
-        sys.stdout.write("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
+        sys.stdout.write("\x1b[?1006l\x1b[?1003l\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
 
     def read_keys(self):
-        keys = []
         while select.select([self.fd], [], [], 0)[0]:
-            data = os.read(self.fd, 256)
+            data = os.read(self.fd, 1024)
             if not data:
                 break
-            i = 0
-            while i < len(data):
-                b = data[i]
-                if b == 0x1B and i + 2 < len(data) and data[i + 1] == 0x5B:
-                    keys.append({"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}.get(chr(data[i + 2]), ""))
-                    i += 3
-                else:
-                    keys.append(chr(b).lower())
-                    i += 1
-        return keys
+            self.buf += data
+        events, self.buf = parse_input(self.buf)
+        return events
 
 
 # --------------------------------------------------------------------------
@@ -785,7 +825,7 @@ class Renderer:
 
     def help_line(self, fps):
         dim = self.fg(pack(95, 95, 105))
-        return f"{dim} W/S move · A/D strafe · ◄ ► turn · SPACE fire · Q quit{' ' * 8}{fps:>2.0f} fps"
+        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · Q quit{' ' * 8}{fps:>2.0f} fps"
 
 
 def darken_fb(fb, red=False):
@@ -817,7 +857,8 @@ def celebrate(term, rnd, g, title, sub, grand=False):
         dt = min(now - last, 0.1)
         last = now
         for k in term.read_keys():
-            if now - start > 0.7 and k:
+            skip = (isinstance(k, str) and k) or (isinstance(k, tuple) and k[0] == "click")
+            if now - start > 0.7 and skip:
                 return
         rnd.check_size()
         if (rnd.fb_w, rnd.fb_h) != (fb_w, fb_h):
@@ -910,6 +951,7 @@ def play(term, rnd):
     g = Game()
     last = time.time()
     fps = TARGET_FPS
+    mouse_x = None
     while True:
         now = time.time()
         dt = min(now - last, 0.1)
@@ -925,7 +967,19 @@ def play(term, rnd):
 
         want_fire = False
         for k in term.read_keys():
-            if k == "q":
+            if isinstance(k, tuple):
+                if k[0] == "move":
+                    if mouse_x is not None:
+                        g.pa += (k[1] - mouse_x) * MOUSE_SENS
+                    mouse_x = k[1]
+                    if k[3] == 0:  # left button held while dragging
+                        want_fire = True
+                elif k[0] == "click":
+                    mouse_x = k[1]
+                    want_fire = True
+                elif k[0] == "scroll":
+                    g.walk(0.22 * k[1], 0)
+            elif k == "q":
                 return "quit"
             elif k in ("w", "UP"):
                 g.walk(0.35, 0)

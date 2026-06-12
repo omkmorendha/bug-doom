@@ -36,12 +36,21 @@ python3 bug_doom.py
 | `G` / right-click | Throw bug bomb               |
 | `1` / `2` / `3`| Switch weapon (pistol / shotgun / SMG) |
 | `M`            | Toggle minimap                  |
+| `P`            | Pause (session stats + options) |
+| `B`            | Toggle terminal bell (inside pause; off by default) |
 | `Q`            | Quit                            |
 | `R`            | Respawn (after death)           |
 
 ## Gameplay
 
-- Bugs spawn endlessly and chase you; spawn rate and speed scale with your kill count.
+- Bugs spawn endlessly and chase you. The **threat level** climbs with time
+  survived and kills — watch the announcements; each level means faster bugs
+  and quicker spawns.
+- Kills earn **points** with a distance bonus, multiplied by a kill-chain
+  **combo** (up to x8) — keep squashing within 3 seconds to keep the chain
+  alive. Getting bitten breaks the streak.
+- Periodic **wave assaults** hit every 90–120 seconds: 6–8 bugs pour in from
+  one side after a warning — watch the banner and the direction marker.
 - Line up a bug with the crosshair and fire. Walls block shots.
 - Three weapons: pistol = accurate long range, shotgun = close-range burst,
   SMG = hold-fire spray (hold click-drag or space to stream shots).
@@ -58,7 +67,10 @@ python3 bug_doom.py
 - Every 100 kills teleports the arena to a new zone — Inferno, Cryo, the Sewers.
 - Corpses pile up — wade through the goo.
 - Bugs bite when adjacent. Health regenerates slowly if you avoid bites for a few seconds.
-- Hit 0 HP and you got debugged — press `R` to respawn.
+- Hit 0 HP and you got debugged — a stats screen shows kills, accuracy, run
+  time, damage taken, and your best combo; press `R` to respawn.
+- High scores and lifetime stats persist in `~/.bug_doom_save.json` — delete
+  the file to reset your records.
 
 ## Bosses
 

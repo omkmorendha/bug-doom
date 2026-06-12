@@ -46,6 +46,11 @@ WEAPONS = [
 PLAYER_START = (16.5, 9.5, 0.0)
 TARGET_FPS = 30
 MOUSE_SENS = 0.05  # radians per terminal column of mouse travel
+BELL = [False]  # terminal bell toggle (B in the pause menu); off by default
+
+# Per-kind base point values for the score system (kills also earn a
+# distance bonus and a kill-chain combo multiplier, see Game.register_kill).
+KILL_POINTS = {"tank": 250, "boss": 1000, "skitter": 120, "spitter": 150, "boomer": 150}
 
 # Wall cells: '#' brick, '%' tech panel, '&' mossy stone. '.' is floor.
 MAP = [
@@ -653,6 +658,8 @@ FONT = {
     "8": (0b01110, 0b10001, 0b01110, 0b10001, 0b01110),
     "9": (0b01110, 0b10001, 0b01111, 0b00001, 0b01110),
     "!": (0b00100, 0b00100, 0b00100, 0b00000, 0b00100),
+    "+": (0b00100, 0b00100, 0b11111, 0b00100, 0b00100),
+    "%": (0b11001, 0b11010, 0b00100, 0b01011, 0b10011),
     "*": (0b10101, 0b01110, 0b11111, 0b01110, 0b10101),
     "-": (0b00000, 0b00000, 0b01110, 0b00000, 0b00000),
     ".": (0b00000, 0b00000, 0b00000, 0b00000, 0b00100),
@@ -685,6 +692,29 @@ def draw_text(fb, fb_w, fb_h, text, cy, scale, color):
                                     xx = gx + rx * scale + dx
                                     if 0 <= xx < fb_w:
                                         row[xx] = pass_color
+
+
+def draw_text_at(fb, fb_w, fb_h, text, x0, y0, color):
+    """Small unscaled text at an explicit position (floating score popups):
+    no centering, no shadow pass."""
+    for i, ch in enumerate(text.upper()):
+        glyph = FONT.get(ch)
+        if not glyph:
+            continue
+        gx = x0 + i * 6
+        for ry in range(5):
+            bits = glyph[ry]
+            if not bits:
+                continue
+            yy = y0 + ry
+            if not 0 <= yy < fb_h:
+                continue
+            row = fb[yy]
+            for rx in range(5):
+                if bits & (1 << (4 - rx)):
+                    xx = gx + rx
+                    if 0 <= xx < fb_w:
+                        row[xx] = color
 
 
 # --------------------------------------------------------------------------
@@ -724,7 +754,10 @@ def record_game_end(g):
     data["total_kills"] = data.get("total_kills", 0) + g.score
     data["games_played"] = data.get("games_played", 0) + 1
     data["longest_run_s"] = max(data.get("longest_run_s", 0.0), time.time() - g.start_time)
+    data["best_points"] = max(data.get("best_points", 0), getattr(g, "points", 0))
+    data["best_combo"] = max(data.get("best_combo", 0), g.best_combo)
     write_save(data)
+    PREV_HIGH[0] = data["high_kills"]  # back-to-back runs compare correctly
 
 
 # --------------------------------------------------------------------------
@@ -801,9 +834,22 @@ class Game:
         self.shots_hit = 0
         self.damage_taken = 0.0
         self.kills_by_kind = {}
-        self.best_combo = 0  # maintained by a future combo system
+        self.best_combo = 0
         self.stats_recorded = False
         self.prev_high = PREV_HIGH[0]
+        # points score + kill-chain combo
+        self.points = 0
+        self.combo = 0
+        self.combo_timer = 0.0
+        self.popups = []  # screen-space [x, y, life, text, color]
+        # threat level: explicit difficulty from time survived + kills
+        self.threat = 1
+        self.threat_announce = 0.0
+        # wave assaults: periodic grouped spawns from one bearing
+        self.wave_timer = 60.0
+        self.wave_warn = 0.0
+        self.wave_dir = 0.0
+        self.wave_num = 0
 
     def try_move(self, nx, ny):
         r = 0.2
@@ -867,7 +913,59 @@ class Game:
         self.damage_taken += dmg
         self.bite_flash = 0.3
         self.last_bite = now
+        self.combo = 0  # taking a hit breaks the kill chain
+        self.combo_timer = 0.0
         return True
+
+    def register_kill(self, bug, dist):
+        """Score points for a kill and advance the combo chain. Stashes the
+        (pts, mult) on the bug so kill_burst can spawn its popup."""
+        self.combo = self.combo + 1 if self.combo_timer > 0 else 1
+        self.combo_timer = 3.0
+        self.best_combo = max(self.best_combo, self.combo)
+        mult = min(self.combo, 8)
+        base = KILL_POINTS.get(getattr(bug, "kind", "grunt"), 100)
+        pts = (base + int(dist * 10)) * mult
+        self.points += pts
+        bug.popup = (pts, mult)
+        return pts, mult
+
+    def update_threat(self, now):
+        """Threat rises every 45s survived OR every 15 kills — whichever is
+        faster — so long survivors keep ramping even when kiting."""
+        new = 1 + max(int((now - self.start_time) // 45), self.score // 15)
+        if new > self.threat:
+            self.threat = new
+            self.threat_announce = 2.2
+
+    def update_wave(self, dt):
+        """Wave assault scheduler: every 90-120s (first at 60s), warn for 2s
+        then spawn 6-8 bugs together from one bearing."""
+        if self.wave_warn <= 0:
+            self.wave_timer -= dt
+            if self.wave_timer <= 0 and self.boss_warn <= 0:
+                self.wave_warn = 2.0
+                self.wave_num += 1
+                self.wave_dir = random.uniform(0, TAU)
+            return
+        self.wave_warn -= dt
+        if self.wave_warn > 0:
+            return
+        n = 6 + min(self.wave_num, 2)
+        placed = 0
+        for _ in range(60):  # waves ignore the trickle cap; hard total 24
+            if placed >= n or len(self.bugs) >= 24:
+                break
+            u = random.uniform(-0.6, 0.6)
+            r = random.uniform(7, 11)
+            x = self.px + math.cos(self.wave_dir + u) * r
+            y = self.py + math.sin(self.wave_dir + u) * r
+            if is_wall(x, y):
+                continue
+            # always a single bug per slot — no skitter cluster expansion
+            self.bugs.append(Bug(x, y, self.pick_kind()))
+            placed += 1
+        self.wave_timer = random.uniform(90, 120)
 
     def _step(self, b, ang, spd, sep):
         """Per-axis wall-checked move (+ separation blend). Returns the
@@ -904,7 +1002,7 @@ class Game:
 
     def update_bugs(self, dt, now):
         """AI/movement step. Returns boomer detonations as (x, y, kills)."""
-        speed = 1.0 + min(self.score * 0.015, 1.5)
+        speed = 1.0 + min(0.12 * (self.threat - 1), 1.5)
         detonations = []
         bugs = self.bugs
         # separation: nearest-neighbour repulsion so packs don't stack.
@@ -1058,6 +1156,7 @@ class Game:
                         bug.flash = 0.0
                     self.score += 1
                     self.kills_by_kind[bug.kind] = self.kills_by_kind.get(bug.kind, 0) + 1
+                    self.register_kill(bug, best[0])
                     events.append((bug, best[0], True))
                 else:
                     if bug.kind != "boss":  # knockback + stagger (boss immune)
@@ -1137,7 +1236,9 @@ class Game:
                     self.bugs.remove(b)
                     self.score += 1
                     self.kills_by_kind[b.kind] = self.kills_by_kind.get(b.kind, 0) + 1
-                    killed.append((b, math.hypot(b.x - self.px, b.y - self.py)))
+                    d_p = math.hypot(b.x - self.px, b.y - self.py)
+                    self.register_kill(b, d_p)
+                    killed.append((b, d_p))
         if player_damage and math.hypot(self.px - x, self.py - y) < player_radius:
             self.hurt(player_damage, now)
         return killed
@@ -1618,6 +1719,12 @@ class Renderer:
                 if 0 <= ix + 1 < fb_w:
                     row[ix + 1] = p[5]
 
+        # floating score popups (screen-anchored, like the splatter)
+        if fb_h >= 40:
+            for p in g.popups:
+                c = p[4] if p[2] > 0.3 else scale_color(p[4], 0.5)
+                draw_text_at(fb, fb_w, fb_h, p[3], int(p[0]), int(p[1]), c)
+
         # minimap (top-right, toggled with M)
         self.draw_minimap(fb, g, now)
 
@@ -1731,9 +1838,18 @@ class Renderer:
         bar = self.fg(bar_c) + "█" * segs + self.fg(pack(50, 50, 56)) + "░" * (10 - segs)
         s = (f" {self.fg(pack(255, 210, 70))}☠ KILLS {g.score:<4}"
              f"{dim}│ {self.fg(pack(240, 80, 80))}♥ {bar}{self.fg(bar_c)} {hp:>3}"
-             f" {dim}│ NEXT MILESTONE {self.fg(pack(120, 200, 255))}{g.next_milestone()}"
+             f" {dim}│ NEXT {self.fg(pack(120, 200, 255))}{g.next_milestone()}"
              f" {dim}│ {self.fg(pack(200, 200, 120))}{WEAPONS[g.weapon]['name']}"
              f" {dim}│ {self.fg(pack(160, 220, 120))}◉ x{g.grenades}")
+        if self.cols >= 70:
+            s += f" {dim}│ {self.fg(pack(255, 255, 255))}PTS {g.points}"
+            if g.combo >= 2 and g.combo_timer > 0:  # flashing chain multiplier
+                cc = pack(255, 140, 40) if int(now * 4) % 2 else pack(255, 200, 80)
+                s += f" {self.fg(cc)}x{min(g.combo, 8)}"
+        if self.cols >= 100:
+            s += f" {dim}│ {self.fg(pack(255, 120, 60))}THREAT {g.threat}"
+        if self.cols >= 110:
+            s += f" {dim}│ BEST {g.prev_high}"
         if self.cols >= 90:
             for until, tag, col in ((g.quad_until, "Q", pack(190, 70, 255)),
                                     (g.speed_until, "S", pack(255, 220, 40)),
@@ -1744,7 +1860,7 @@ class Renderer:
 
     def help_line(self, fps):
         dim = self.fg(pack(95, 95, 105))
-        return f"{dim} WASD move · mouse/◄► aim · click/SPACE fire · G nade · 1-3 weapon · M map · Q quit{' ' * 8}{fps:>2.0f} fps"
+        return f"{dim} WASD move · mouse aim · click/SPC fire · G nade · 1-3 wpn · M map · P pause · Q quit{' ' * 8}{fps:>2.0f} fps"
 
 
 def darken_fb(fb, red=False):
@@ -1826,18 +1942,40 @@ def celebrate(term, rnd, g, title, sub, grand=False):
 
 
 def game_over(term, rnd, g):
-    base = darken_fb(rnd.render_world(g, time.time()), red=True)
+    death_time = time.time()  # freeze the run clock at the moment of death
+    base = darken_fb(rnd.render_world(g, death_time), red=True)
+    fb_w, fb_h = rnd.fb_w, rnd.fb_h
+    acc = (100 * g.shots_hit // g.shots_fired) if g.shots_fired else 0
+    secs = int(death_time - g.start_time)
+    kpm = g.score * 60 / max(secs, 1)
     while True:
         now = time.time()
         rnd.check_size()
+        if (rnd.fb_w, rnd.fb_h) != (fb_w, fb_h):
+            base = darken_fb(rnd.render_world(g, now), red=True)
+            fb_w, fb_h = rnd.fb_w, rnd.fb_h
         fb = [row[:] for row in base]
-        fb_w, fb_h = rnd.fb_w, rnd.fb_h
-        ty = fb_h // 3
+        ty = fb_h // 4
+        label = pack(220, 220, 230)
         draw_text(fb, fb_w, fb_h, "YOU GOT", ty, 2, pack(255, 70, 60))
         draw_text(fb, fb_w, fb_h, "DEBUGGED", ty + 14, 2, pack(255, 70, 60))
-        draw_text(fb, fb_w, fb_h, f"FINAL KILLS {g.score}", ty + 30, 1, pack(230, 230, 230))
+        draw_text(fb, fb_w, fb_h, f"KILLS {g.score}   ACCURACY {acc}%", ty + 30, 1, label)
+        y = ty + 38
+        if fb_h >= 60:  # full stat block only when there's room
+            draw_text(fb, fb_w, fb_h, f"TIME {secs // 60}.{secs % 60:02d}   {kpm:.0f} K-MIN", y, 1, label)
+            y += 8
+            draw_text(fb, fb_w, fb_h, f"DMG TAKEN {int(g.damage_taken)}", y, 1, label)
+            y += 8
+            if g.best_combo > 0:
+                draw_text(fb, fb_w, fb_h, f"BEST COMBO X{g.best_combo}", y, 1, label)
+                y += 8
+        if g.score > g.prev_high:
+            if int(now * 2) % 2:
+                draw_text(fb, fb_w, fb_h, "NEW HIGH SCORE!", y, 1, pack(255, 210, 80))
+        else:
+            draw_text(fb, fb_w, fb_h, f"BEST {g.prev_high}", y, 1, pack(160, 160, 170))
         if int(now * 2) % 2:
-            draw_text(fb, fb_w, fb_h, "R RESPAWN - Q QUIT", ty + 40, 1, pack(255, 210, 80))
+            draw_text(fb, fb_w, fb_h, "R RESPAWN - Q QUIT", y + 10, 1, pack(255, 210, 80))
         sys.stdout.write(rnd.compose(fb, rnd.hud_line(g), rnd.help_line(0)))
         sys.stdout.flush()
         for k in term.read_keys():
@@ -1845,6 +1983,42 @@ def game_over(term, rnd, g):
                 return "restart"
             if k == "q":
                 return "quit"
+        time.sleep(0.05)
+
+
+def pause_menu(term, rnd, g):
+    """Blocking pause overlay (P). Returns 'resume', 'restart', or 'quit'."""
+    base = darken_fb(rnd.render_world(g, time.time()))
+    fb_w, fb_h = rnd.fb_w, rnd.fb_h
+    while True:
+        now = time.time()
+        rnd.check_size()
+        if (rnd.fb_w, rnd.fb_h) != (fb_w, fb_h):
+            base = darken_fb(rnd.render_world(g, now))
+            fb_w, fb_h = rnd.fb_w, rnd.fb_h
+        fb = [row[:] for row in base]
+        ty = fb_h // 4
+        label = pack(220, 220, 230)
+        draw_text(fb, fb_w, fb_h, "PAUSED", ty, 2, pack(255, 220, 80))
+        draw_text(fb, fb_w, fb_h, f"KILLS {g.score}", ty + 16, 1, label)
+        draw_text(fb, fb_w, fb_h, f"TIME {int(now - g.start_time)}S", ty + 24, 1, label)
+        draw_text(fb, fb_w, fb_h, f"POINTS {g.points}", ty + 32, 1, label)
+        draw_text(fb, fb_w, fb_h, f"B BELL {'ON' if BELL[0] else 'OFF'}", ty + 40, 1, pack(160, 200, 160))
+        if int(now * 2) % 2:
+            draw_text(fb, fb_w, fb_h, "P RESUME - R RESTART - Q QUIT", ty + 50, 1, pack(255, 210, 80))
+        sys.stdout.write(rnd.compose(fb, rnd.hud_line(g), rnd.help_line(0)))
+        sys.stdout.flush()
+        for k in term.read_keys():
+            if isinstance(k, tuple):
+                continue  # a stray mouse drag must not unpause
+            if k in ("p", " "):
+                return "resume"
+            if k == "r":
+                return "restart"
+            if k == "q":
+                return "quit"
+            if k == "b":
+                BELL[0] = not BELL[0]
         time.sleep(0.05)
 
 
@@ -1878,6 +2052,20 @@ def kill_burst(rnd, g, bug, dist):
         sp = random.uniform(6, 40) / (1 + dist * 0.15)
         g.particles.append([sx, sy, math.cos(a) * sp, math.sin(a) * sp - 12,
                             random.uniform(0.3, 0.8), random.choice(goo)])
+    pm = getattr(bug, "popup", None)
+    if pm:
+        bug.popup = None  # boss kills splatter twice; pop the score once
+        pts, mult = pm
+        text = f"+{pts}" + (f" X{mult}" if mult >= 2 else "")
+        if bug.kind in ("tank", "boss"):
+            color = pack(255, 214, 40)
+        elif mult >= 2:
+            color = pack(255, 160, 40)
+        else:
+            color = pack(140, 235, 140)
+        g.popups.append([sx - 12, sy - 6, 0.9, text, color])
+        if len(g.popups) > 8:
+            g.popups.pop(0)
 
 
 def explosion_burst(rnd, g, x, y, n=35, colors=None):
@@ -1965,6 +2153,19 @@ def play(term, rnd):
                 want_nade = True
             elif k == "m":
                 g.show_map = not g.show_map
+            elif k == "p":
+                res = pause_menu(term, rnd, g)
+                if res == "quit":
+                    record_game_end(g)
+                    return "quit"
+                if res == "restart":
+                    record_game_end(g)  # an abandoned life still counts
+                    g = Game()
+                    rnd.set_theme(0)
+                last = time.time()  # don't let the dt clamp jump time
+                mouse_x = None  # re-anchor aim: ignore pause-travel delta
+                want_fire = want_nade = False
+                break  # queued pre-pause inputs must not fire on resume
             elif k in ("1", "2", "3"):
                 g.weapon = int(k) - 1
             elif k in ("w", "UP"):
@@ -2055,13 +2256,18 @@ def play(term, rnd):
                 g.bugs.append(b)
                 boss_alive = True
 
+        g.update_threat(now)
+        g.update_wave(dt)
+
         g.spawn_timer -= dt
-        cap = min(5 + g.score // 8, 18)
-        if g.spawn_timer <= 0 and g.boss_warn <= 0:
+        cap = min(6 + 2 * g.threat, 18)
+        # trickle spawner pauses during a wave warning so the wave reads as
+        # a discrete event
+        if g.spawn_timer <= 0 and g.boss_warn <= 0 and g.wave_warn <= 0:
             normal = sum(1 for b in g.bugs if b.kind != "boss")
             if normal < cap and (not boss_alive or len(g.bugs) < 22):
                 g.spawn_bug()
-                g.spawn_timer = max(0.6, 2.5 - g.score * 0.02)
+                g.spawn_timer = max(0.5, 2.6 - 0.25 * g.threat)
 
         for x, y, kills in g.update_bugs(dt, now):  # boomer fuse detonations
             explosion_burst(rnd, g, x, y, n=70, colors=BOOMER_BURST)
@@ -2120,6 +2326,10 @@ def play(term, rnd):
         g.bite_flash = max(0.0, g.bite_flash - dt)
         g.shake = max(0.0, g.shake - dt)
         g.hit_marker = max(0.0, g.hit_marker - dt)
+        g.threat_announce = max(0.0, g.threat_announce - dt)
+        g.combo_timer = max(0.0, g.combo_timer - dt)
+        if g.combo_timer <= 0:
+            g.combo = 0  # chain window expired
         if g.hit_marker <= 0:
             g.hit_kill = False
         for p in g.particles:
@@ -2128,6 +2338,10 @@ def play(term, rnd):
             p[3] += 55 * dt
             p[4] -= dt
         g.particles = [p for p in g.particles if p[4] > 0]
+        for p in g.popups:  # score popups rise and fade
+            p[1] -= 14 * dt
+            p[2] -= dt
+        g.popups = [p for p in g.popups if p[2] > 0]
 
         if g.hp <= 0:
             record_game_end(g)
@@ -2159,6 +2373,39 @@ def play(term, rnd):
             last = time.time()
 
         fb = rnd.render_world(g, now)
+        if g.wave_warn > 0:  # wave warning wins the banner slot for the frame
+            fbw, fbh = rnd.fb_w, rnd.fb_h
+            wc = pack(255, 90, 60) if int(now * 5) % 2 else pack(255, 200, 80)
+            draw_text(fb, fbw, fbh, "WAVE INCOMING", fbh // 5,
+                      2 if fbw >= 100 else 1, wc)
+            if g.wave_num == 1:
+                draw_text(fb, fbw, fbh, "THEY COME FROM ONE SIDE",
+                          fbh // 5 + 14, 1, pack(220, 220, 230))
+            # direction cue: chevron over the bearing, or an edge arrow
+            rel = angle_diff(g.wave_dir, g.pa)
+            arrow = pack(255, 80, 60)
+            if abs(rel) < FOV / 2:  # on-screen: downward chevron
+                x = int((0.5 + rel / FOV) * fbw)
+                ya = fbh // 5 + 16
+                for ox, oy in ((0, 0), (-1, 1), (1, 1), (-2, 2), (2, 2)):
+                    xx, yy = x + ox, ya + oy
+                    if 0 <= xx < fbw and 0 <= yy < fbh:
+                        fb[yy][xx] = arrow
+            else:  # off-screen: '<' / '>' arrow hugging the edge
+                tip = fbw - 2 if rel > 0 else 1
+                d = -1 if rel > 0 else 1
+                ym = fbh // 2
+                for ox, oy in ((0, 0), (d, -1), (d, 1), (2 * d, -2), (2 * d, 2), (3 * d, 0)):
+                    xx, yy = tip + ox, ym + oy
+                    if 0 <= xx < fbw and 0 <= yy < fbh:
+                        fb[yy][xx] = arrow
+        elif g.threat_announce > 0:  # non-blocking threat-level announcement
+            color = pack(255, 90, 60) if int(now * 5) % 2 else pack(255, 160, 60)
+            big = rnd.fb_w >= 100
+            draw_text(fb, rnd.fb_w, rnd.fb_h, f"THREAT LEVEL {g.threat}",
+                      rnd.fb_h // 5, 2 if big else 1, color)
+            draw_text(fb, rnd.fb_w, rnd.fb_h, "THEY ARE GETTING FASTER",
+                      rnd.fb_h // 5 + (16 if big else 9), 1, pack(220, 220, 230))
         if g.boss_warn > 0 and int(now * 6) % 2:  # incoming-boss klaxon
             wc = pack(180, 30, 30)
             fbw, fbh = rnd.fb_w, rnd.fb_h

@@ -553,9 +553,13 @@ class Term:
         return self
 
     def __exit__(self, *exc):
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
         sys.stdout.write("\x1b[?1006l\x1b[?1003l\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
+        # discard buffered keystrokes (held keys queue input faster than the
+        # game reads it) so they don't leak into the shell after exit
+        time.sleep(0.05)
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old)
 
     def read_keys(self):
         while select.select([self.fd], [], [], 0)[0]:

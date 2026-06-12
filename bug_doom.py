@@ -502,7 +502,9 @@ class Game:
 ARROW_KEYS = {0x41: "UP", 0x42: "DOWN", 0x43: "RIGHT", 0x44: "LEFT"}
 # SGR mouse report: ESC [ < code ; col ; row M (press/motion) or m (release)
 MOUSE_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
-PARTIAL_ESC_RE = re.compile(rb"\x1b(\[(<[\d;]*)?)?$")
+# any other CSI sequence (modified arrows like ESC[1;2D, function keys, ...)
+CSI_RE = re.compile(rb"\x1b\[[0-9;<=>?]*[ -/]*[@-~]")
+PARTIAL_ESC_RE = re.compile(rb"\x1b(\[|O)?[0-9;<=>?]*$")
 
 
 def parse_input(buf):
@@ -510,6 +512,8 @@ def parse_input(buf):
 
     Events are key strings ('w', ' ', 'LEFT', ...) or mouse tuples:
     ('move', col, row, button_bits), ('click', col, row), ('scroll', +1/-1).
+    Unrecognized escape sequences are swallowed whole — their bytes must
+    never fall through as literal keypresses.
     """
     events = []
     i, n = 0, len(buf)
@@ -527,12 +531,17 @@ def parse_input(buf):
                     events.append(("click", x, y))
                 i = m.end()
                 continue
-            if i + 2 < n and buf[i + 1] == 0x5B and buf[i + 2] in ARROW_KEYS:
+            # plain (ESC [ X) and application-mode (ESC O X) arrows
+            if i + 2 < n and buf[i + 1] in (0x5B, 0x4F) and buf[i + 2] in ARROW_KEYS:
                 events.append(ARROW_KEYS[buf[i + 2]])
                 i += 3
                 continue
-            # keep a split escape sequence for the next read; drop a bare ESC
-            if n - i >= 2 and n - i < 24 and PARTIAL_ESC_RE.match(buf, i):
+            m = CSI_RE.match(buf, i)
+            if m:  # some other escape sequence — discard it entirely
+                i = m.end()
+                continue
+            # possibly a sequence split across reads — keep for the next one
+            if n - i < 24 and PARTIAL_ESC_RE.match(buf, i):
                 break
             i += 1
             continue
@@ -546,6 +555,7 @@ class Term:
         self.fd = sys.stdin.fileno()
         self.old = termios.tcgetattr(self.fd)
         self.buf = b""
+        self.stall = 0
         tty.setcbreak(self.fd)
         # alt screen, hide cursor, no autowrap, SGR any-motion mouse tracking
         sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1003h\x1b[?1006h\x1b[2J")
@@ -555,18 +565,39 @@ class Term:
     def __exit__(self, *exc):
         sys.stdout.write("\x1b[?1006l\x1b[?1003l\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
-        # discard buffered keystrokes (held keys queue input faster than the
-        # game reads it) so they don't leak into the shell after exit
-        time.sleep(0.05)
+        # a key still held at quit keeps repeating into the tty; keep
+        # swallowing input until the keyboard goes quiet so nothing leaks
+        # into the shell after exit
+        deadline = time.time() + 1.0
+        last_input = time.time()
+        while time.time() < deadline and time.time() - last_input < 0.15:
+            if select.select([self.fd], [], [], 0.05)[0]:
+                try:
+                    if os.read(self.fd, 4096):
+                        last_input = time.time()
+                except OSError:
+                    break
         termios.tcflush(self.fd, termios.TCIFLUSH)
         termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old)
 
     def read_keys(self):
+        got_new = False
         while select.select([self.fd], [], [], 0)[0]:
             data = os.read(self.fd, 1024)
             if not data:
                 break
             self.buf += data
+            got_new = True
+        # a retained partial escape sequence that never completes (e.g. a
+        # bare ESC keypress) must not wedge the parser: drop it after a few
+        # frames with no continuation bytes
+        if self.buf and not got_new:
+            self.stall += 1
+            if self.stall >= 3:
+                self.buf = self.buf[1:]
+                self.stall = 0
+        else:
+            self.stall = 0
         events, self.buf = parse_input(self.buf)
         return events
 
